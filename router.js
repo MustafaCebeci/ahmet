@@ -44,6 +44,7 @@ router.get("/appointments/test-stream", (req, res) => {
 router.post("/appointments/can-book", BookingControllers.canBook);
 router.post("/appointments/available-slots", BookingControllers.getAvailableSlots);
 router.post("/appointments/slots/generate", BookingControllers.generateSlots);
+router.post("/appointments/slots/generate/v2", BookingControllers.generateSlotsV2);
 router.post("/appointments/success-details", BookingControllers.successDetails);
 router.post("/appointments/success-details-all", BookingControllers.successDetailsAll);
 router.post("/appointments/cancel", BookingControllers.cancel);
@@ -141,5 +142,19 @@ router.put("/period_settings/:id", ScopedControllers.periodSettingsUpdate);
 router.post("/period_settings/:id", ScopedControllers.periodSettingsDelete);
 router.post("/period_settings/for-date", ScopedControllers.periodSettingsForDate);
 router.post("/period_settings/:id/preview-update", ScopedControllers.periodSettingsPreviewUpdate);
+
+// V2 Slot Engine - provider_break_rules CRUD
+router.get("/provider_break_rules", ScopedControllers.providerBreakRulesList);
+router.post("/provider_break_rules", ScopedControllers.providerBreakRulesCreate);
+router.put("/provider_break_rules/:id", ScopedControllers.providerBreakRulesUpdate);
+router.delete("/provider_break_rules/:id", ScopedControllers.providerBreakRulesDelete);
+router.get("/provider_break_rules/:id", ScopedControllers.providerBreakRulesGetById);
+
+// V2 Slot Engine - provider_static_slots CRUD
+router.get("/provider_static_slots", ScopedControllers.providerStaticSlotsList);
+router.post("/provider_static_slots", ScopedControllers.providerStaticSlotsCreate);
+router.put("/provider_static_slots/:id", ScopedControllers.providerStaticSlotsUpdate);
+router.delete("/provider_static_slots/:id", ScopedControllers.providerStaticSlotsDelete);
+router.get("/provider_static_slots/:id", ScopedControllers.providerStaticSlotsGetById);
 
 module.exports = router;

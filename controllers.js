@@ -3079,6 +3079,199 @@ const BookingControllers = {
     }),
 
     /**
+     * POST /api/appointments/slots/generate/v2
+     * V2 Slot Generator - Uses generateSlotsV2Engine for pure algorithm
+     */
+    generateSlotsV2: asyncWrap(async (req, res) => {
+        const decoded = readJwtFromReq(req);
+        if (!decoded) throw httpError(401, "Unauthenticated");
+
+        // Import engine at runtime to avoid circular deps
+        const { generateSlotsV2Engine } = require("./src/services/slot-generator-v2");
+
+        const body = req.body || {};
+        const dateStr = String(body.date || "").trim();
+        const staffId = Number(body.staffId ?? body.staff_id ?? body.providerId ?? body.provider_id);
+        const serviceId = Number(body.serviceId ?? body.service_id);
+
+        const targetDate = dateStr || t.todayYmd();
+
+        // ====== Get Business Settings ======
+        const settingsJson = await getBusinessSettingsJson();
+        let startHour = String(settingsJson.start_hour ?? settingsJson.open_time ?? "09:00");
+        let endHour = String(settingsJson.end_hour ?? settingsJson.close_time ?? "22:00");
+        let slotTime = Number(settingsJson.slot_time ?? 60);
+
+        // ====== Period Settings Override ======
+        const [periodRows] = await pool.execute(`
+            SELECT data_json FROM period_settings
+            WHERE start_date <= ? AND end_date >= ?
+            LIMIT 1
+        `, [targetDate, targetDate]);
+
+        let isClosedDay = false;
+        if (periodRows.length > 0) {
+            let periodData = periodRows[0].data_json;
+            if (typeof periodData === "string") {
+                periodData = JSON.parse(periodData);
+            }
+            const periodSettings = periodData?.settings;
+
+            // Closed days check
+            if (periodSettings?.closed_days && Array.isArray(periodSettings.closed_days)) {
+                const targetDateObj = t.fromYmd(targetDate);
+                const dayOfWeek = targetDateObj.dayOfWeek;
+                const jsDayOfWeek = dayOfWeek === 7 ? 0 : dayOfWeek;
+                if (periodSettings.closed_days.includes(jsDayOfWeek)) {
+                    isClosedDay = true;
+                }
+            }
+
+            if (periodSettings?.start_hour) startHour = String(periodSettings.start_hour);
+            if (periodSettings?.end_hour) endHour = String(periodSettings.end_hour);
+            if (periodSettings?.slot_time) slotTime = Number(periodSettings.slot_time);
+        }
+
+        if (isClosedDay) {
+            return res.json({ ok: true, date: targetDate, slots: [], settings: { open_time: startHour, close_time: endHour, slot_time: slotTime, duration: slotTime } });
+        }
+
+        // ====== Get Service Duration ======
+        let duration = slotTime;
+        if (serviceId) {
+            const [svcRows] = await pool.execute(
+                "SELECT duration_minutes FROM services WHERE id = ? LIMIT 1",
+                [serviceId]
+            );
+            if (svcRows.length && svcRows[0].duration_minutes) {
+                duration = Number(svcRows[0].duration_minutes);
+            }
+        }
+
+        // ====== Provider Resolution ======
+        let providerId = null;
+        if (staffId) {
+            const provider = await ensureStaffProvider(staffId);
+            if (provider) providerId = provider.id;
+        }
+
+        // ====== Get Appointments ======
+        const appointments = [];
+        let apptQuery = `SELECT start_at, end_at FROM appointments WHERE DATE(start_at) = ? AND status = 'confirmed'`;
+        let apptParams = [targetDate];
+        if (providerId) {
+            apptQuery += " AND provider_id = ?";
+            apptParams.push(providerId);
+        }
+        const [apptRows] = await pool.execute(apptQuery, apptParams);
+        for (const appt of apptRows) {
+            const startDt = t.fromDBDateTime(appt.start_at);
+            const endDt = t.fromDBDateTime(appt.end_at);
+            appointments.push({
+                start: `${String(startDt.hour).padStart(2,'0')}:${String(startDt.minute).padStart(2,'0')}`,
+                end: `${String(endDt.hour).padStart(2,'0')}:${String(endDt.minute).padStart(2,'0')}`
+            });
+        }
+
+        // ====== Get Closures ======
+        const closures = [];
+        let closureQuery = `
+            SELECT start_at, end_at, scope FROM closures
+            WHERE status = 'active'
+              AND DATE(start_at) <= ?
+              AND DATE(end_at) >= ?
+              AND (
+                (scope = 'global' AND provider_id IS NULL)
+                OR (scope = 'provider' AND provider_id = ?)
+              )
+        `;
+        let closureParams = [targetDate, targetDate];
+        if (providerId) closureParams.push(providerId);
+        const [closureRows] = await pool.execute(closureQuery, closureParams);
+        for (const closure of closureRows) {
+            const startDt = t.fromDBDateTime(closure.start_at);
+            const endDt = t.fromDBDateTime(closure.end_at);
+            closures.push({
+                start: `${String(startDt.hour).padStart(2,'0')}:${String(startDt.minute).padStart(2,'0')}`,
+                end: `${String(endDt.hour).padStart(2,'0')}:${String(endDt.minute).padStart(2,'0')}`,
+                scope: closure.scope
+            });
+        }
+
+        // ====== Get Break Rules ======
+        const { expandWeeklyBreakRules } = require('./src/services/weekly-break-rule-expander');
+        let weeklyBreakRule = null;
+        if (providerId) {
+            const [breakRows] = await pool.execute(
+                `SELECT rule_json FROM provider_break_rules WHERE provider_id = ? AND is_active = 1`,
+                [providerId]
+            );
+            if (breakRows.length > 0) {
+                let ruleJson = breakRows[0].rule_json;
+                if (typeof ruleJson === "string") {
+                    try { ruleJson = JSON.parse(ruleJson); } catch { ruleJson = null; }
+                }
+                weeklyBreakRule = ruleJson;
+            }
+        }
+        const breakRules = expandWeeklyBreakRules({
+            date: targetDate,
+            weeklyBreakRule
+        });
+
+        // ====== Get Static Slots ======
+        const staticSlots = [];
+        if (providerId) {
+            const [staticRows] = await pool.execute(
+                `SELECT start_time, end_time FROM provider_static_slots WHERE provider_id = ? AND is_active = 1`,
+                [providerId]
+            );
+            for (const row of staticRows) {
+                const startTimeStr = typeof row.start_time === "string" ? row.start_time.slice(0, 5) : String(row.start_time).slice(0, 5);
+                const endTimeStr = typeof row.end_time === "string" ? row.end_time.slice(0, 5) : String(row.end_time).slice(0, 5);
+                staticSlots.push({ start: startTimeStr, end: endTimeStr });
+            }
+        }
+
+        // ====== Today Filter ======
+        const nowZ = t.now();
+        const isToday = targetDate === nowZ.toPlainDate().toString();
+        const currentMinute = isToday ? nowZ.hour * 60 + nowZ.minute : null;
+
+        // ====== Call Engine ======
+        const engineResult = generateSlotsV2Engine({
+            date: targetDate,
+            serviceDuration: duration,
+            workingHours: { start: startHour, end: endHour },
+            appointments,
+            closures,
+            breakRules,
+            staticSlots,
+            isToday,
+            currentMinute,
+            settings: { slotTime }
+        });
+
+        // ====== Generate Bookable Slots ======
+        // Import at runtime to avoid circular deps
+        const { generateBookableSlots } = require("./src/services/booking-candidate-generator.js");
+
+        const bookableSlots = generateBookableSlots({
+            timeline: engineResult.slots,
+            serviceDuration: duration,
+            workingHours: { start: startHour, end: endHour },
+            staticSlots: staticSlots
+        });
+
+        return res.json({
+            ok: true,
+            date: targetDate,
+            slots: bookableSlots,
+            settings: engineResult.settings
+        });
+    }),
+
+    /**
      * POST /api/appointments/cancel
      * body: { appointmentId: number, reason?: string }
      */
@@ -4516,7 +4709,163 @@ const ScopedControllers = {
                 data_json: dataJson
             }
         });
-    })
+    }),
+
+    // ============ V2 SLOT ENGINE CRUD ============
+
+    /**
+     * provider_break_rules CRUD
+     */
+    providerBreakRulesList: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const [rows] = await pool.execute(
+            `SELECT pbr.*, sp.name AS provider_name
+             FROM provider_break_rules pbr
+             LEFT JOIN service_providers sp ON sp.id = pbr.provider_id
+             WHERE pbr.is_active = 1
+             ORDER BY pbr.id`
+        );
+        const items = rows.map(r => {
+            let ruleJson = r.rule_json;
+            if (typeof ruleJson === "string") {
+                try { ruleJson = JSON.parse(ruleJson); } catch { ruleJson = {}; }
+            }
+            return { ...r, rule_json: ruleJson };
+        });
+        return res.json({ ok: true, items });
+    }),
+
+    providerBreakRulesCreate: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const body = req.body || {};
+        const providerId = Number(body.provider_id);
+        const ruleJson = body.rule_json;
+        const isActive = body.is_active ?? 1;
+        if (!providerId) throw httpError(400, "provider_id zorunlu");
+        if (!ruleJson) throw httpError(400, "rule_json zorunlu");
+        const ruleJsonStr = typeof ruleJson === "string" ? ruleJson : JSON.stringify(ruleJson);
+        const id = await Models.provider_break_rules.create({
+            provider_id: providerId,
+            rule_json: ruleJsonStr,
+            is_active: isActive ? 1 : 0,
+        });
+        return res.status(201).json({ ok: true, id });
+    }),
+
+    providerBreakRulesUpdate: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const id = Number(req.params.id);
+        if (!id) throw httpError(400, "id zorunlu");
+        const body = req.body || {};
+        const payload = {};
+        if (body.provider_id !== undefined) payload.provider_id = Number(body.provider_id);
+        if (body.rule_json !== undefined) {
+            payload.rule_json = typeof body.rule_json === "string" ? body.rule_json : JSON.stringify(body.rule_json);
+        }
+        if (body.is_active !== undefined) payload.is_active = body.is_active ? 1 : 0;
+        const ok = await Models.provider_break_rules.update({ id }, payload);
+        if (!ok) return res.status(404).json({ ok: false, message: "Not found" });
+        return res.json({ ok: true });
+    }),
+
+    providerBreakRulesDelete: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const id = Number(req.params.id);
+        if (!id) throw httpError(400, "id zorunlu");
+        const ok = await Models.provider_break_rules.remove({ id });
+        if (!ok) return res.status(404).json({ ok: false, message: "Not found" });
+        return res.json({ ok: true });
+    }),
+
+    providerBreakRulesGetById: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const id = Number(req.params.id);
+        if (!id) throw httpError(400, "id zorunlu");
+        const item = await Models.provider_break_rules.get({ id });
+        if (!item) return res.status(404).json({ ok: false, message: "Not found" });
+        let ruleJson = item.rule_json;
+        if (typeof ruleJson === "string") {
+            try { ruleJson = JSON.parse(ruleJson); } catch { ruleJson = {}; }
+        }
+        return res.json({ ok: true, item: { ...item, rule_json: ruleJson } });
+    }),
+
+    /**
+     * provider_static_slots CRUD
+     */
+    providerStaticSlotsList: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const [rows] = await pool.execute(
+            `SELECT pss.*, sp.name AS provider_name
+             FROM provider_static_slots pss
+             LEFT JOIN service_providers sp ON sp.id = pss.provider_id
+             WHERE pss.is_active = 1
+             ORDER BY pss.id`
+        );
+        return res.json({ ok: true, items: rows });
+    }),
+
+    providerStaticSlotsCreate: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const body = req.body || {};
+        const providerId = Number(body.provider_id);
+        const startTime = body.start_time;
+        const endTime = body.end_time;
+        const isActive = body.is_active ?? 1;
+        if (!providerId) throw httpError(400, "provider_id zorunlu");
+        if (!startTime) throw httpError(400, "start_time zorunlu");
+        if (!endTime) throw httpError(400, "end_time zorunlu");
+        const id = await Models.provider_static_slots.create({
+            provider_id: providerId,
+            start_time: startTime,
+            end_time: endTime,
+            is_active: isActive ? 1 : 0,
+        });
+        return res.status(201).json({ ok: true, id });
+    }),
+
+    providerStaticSlotsUpdate: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const id = Number(req.params.id);
+        if (!id) throw httpError(400, "id zorunlu");
+        const body = req.body || {};
+        const payload = {};
+        if (body.provider_id !== undefined) payload.provider_id = Number(body.provider_id);
+        if (body.start_time !== undefined) payload.start_time = body.start_time;
+        if (body.end_time !== undefined) payload.end_time = body.end_time;
+        if (body.is_active !== undefined) payload.is_active = body.is_active ? 1 : 0;
+        const ok = await Models.provider_static_slots.update({ id }, payload);
+        if (!ok) return res.status(404).json({ ok: false, message: "Not found" });
+        return res.json({ ok: true });
+    }),
+
+    providerStaticSlotsDelete: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const id = Number(req.params.id);
+        if (!id) throw httpError(400, "id zorunlu");
+        const ok = await Models.provider_static_slots.remove({ id });
+        if (!ok) return res.status(404).json({ ok: false, message: "Not found" });
+        return res.json({ ok: true });
+    }),
+
+    providerStaticSlotsGetById: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const id = Number(req.params.id);
+        if (!id) throw httpError(400, "id zorunlu");
+        const item = await Models.provider_static_slots.get({ id });
+        if (!item) return res.status(404).json({ ok: false, message: "Not found" });
+        return res.json({ ok: true, item });
+    }),
 };
 
 module.exports = { AuthControllers, BookingControllers, ScopedControllers, asyncWrap };

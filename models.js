@@ -326,6 +326,19 @@ const Models = {
             "updated_at",
         ],
     }),
+
+    // V2 Slot Engine Tables
+    provider_break_rules: createCrudModel({
+        table: "provider_break_rules",
+        pk: "id",
+        columns: ["id", "provider_id", "rule_json", "is_active", "created_at", "updated_at"],
+    }),
+
+    provider_static_slots: createCrudModel({
+        table: "provider_static_slots",
+        pk: "id",
+        columns: ["id", "provider_id", "start_time", "end_time", "is_active", "created_at", "updated_at"],
+    }),
 };
 
 module.exports = { pool, Models };
