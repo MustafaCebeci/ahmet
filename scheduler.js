@@ -221,7 +221,8 @@ async function sendReminders() {
                     appointment_id: appt.id,
                     phone: appt.phone,
                     message: message,
-                    type: "reminder"
+                    type: "reminder",
+                    source: "cron"
                 });
                 console.log(`[SCHEDULER] Hatırlatma SMS gönderildi: Randevu #${appt.id}`);
             } catch (smsErr) {

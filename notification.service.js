@@ -87,6 +87,7 @@ async function logSmsToDb({
     status = "sent",
     provider_msg_id = null,
     error_message = null,
+    source = "system",
 }) {
     // Backend'de hesapla (MySQL NOW() kullanma - timezone sorunu olur)
     const now = t.toISODateTime(t.now());
@@ -94,10 +95,10 @@ async function logSmsToDb({
 
     await pool.execute(
         `INSERT INTO sms_messages
-      (appointment_id, to_phone, type, body, provider, status, provider_msg_id, error_message, scheduled_at, sent_at)
+      (appointment_id, to_phone, type, body, provider, status, provider_msg_id, error_message, scheduled_at, sent_at, source)
      VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [appointment_id, to_phone, type, body, provider, status, provider_msg_id, error_message, now, sentAt]
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [appointment_id, to_phone, type, body, provider, status, provider_msg_id, error_message, now, sentAt, source]
     );
 }
 
@@ -140,7 +141,7 @@ function createSmsApi() {
  * - MesajPaneliApi + TopluMesaj kullanım stili
  * - sms_messages loglar
  */
-async function sendSms({ appointment_id = null, phone, message, type = "otp" }) {
+async function sendSms({ appointment_id = null, phone, message, type = "otp", source = "system" }) {
     const smsApi = createSmsApi();
 
     const baslik = env("SMS_BASLIK", "TBS AV.ORT.");
@@ -165,6 +166,7 @@ async function sendSms({ appointment_id = null, phone, message, type = "otp" }) 
             status: "sent",
             provider_msg_id: providerMsgId,
             error_message: null,
+            source,
         });
 
         return resp;
@@ -180,6 +182,7 @@ async function sendSms({ appointment_id = null, phone, message, type = "otp" }) 
             status: "failed",
             provider_msg_id: null,
             error_message: errText,
+            source,
         });
 
         throw new Error(errText);

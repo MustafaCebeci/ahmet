@@ -1364,6 +1364,84 @@ const BookingControllers = {
     }),
 
     /**
+     * POST /api/appointments/v2/panel
+     * Returns only appointments for a specific date (optimized for calendar view)
+     */
+    panelListV2: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        const staffId = decoded.staff_id ?? decoded.staffId ?? null;
+        const isAdmin = Number(decoded.is_admin ?? decoded.isAdmin ?? 0) === 1;
+        if (!staffId && !isAdmin) throw httpError(403, "staff_id missing");
+
+        const { date } = req.body;
+        if (!date) throw httpError(400, "date parametresi gerekli");
+
+        const businessId = getPersonalBusinessId();
+        const branchId = getPersonalBranchId();
+
+        // Takvim sistemi: seçili gün 06:00 - ertesi gün 03:00
+        const startDateTime = `${date} 06:00:00`;
+        const endDate = new Date(date + 'T00:00:00');
+        endDate.setDate(endDate.getDate() + 1);
+        const endYear = endDate.getFullYear();
+        const endMonth = String(endDate.getMonth() + 1).padStart(2, '0');
+        const endDay = String(endDate.getDate()).padStart(2, '0');
+        const endDateTime = `${endYear}-${endMonth}-${endDay} 03:00:00`;
+
+        let query = `
+            SELECT
+                a.id AS appointment_id,
+                a.provider_id,
+                sp.provider_type,
+                sp.staff_id AS staff_id,
+                a.service_id,
+                a.customer_id,
+                a.start_at,
+                a.end_at,
+                a.status,
+                a.service_name_snapshot,
+                a.service_price_snapshot,
+                c.display_name AS customer_name
+            FROM appointments a
+            LEFT JOIN customers c ON c.id = a.customer_id
+            LEFT JOIN service_providers sp ON sp.id = a.provider_id
+            WHERE a.start_at >= ? AND a.start_at <= ?
+        `;
+        const params = [startDateTime, endDateTime];
+
+        if (req.body.provider_ids) {
+            const providerIds = String(req.body.provider_ids).split(',').map(id => parseInt(id.trim())).filter(n => !isNaN(n) && n > 0);
+            if (providerIds.length > 0) {
+                const placeholders = providerIds.map(() => '?').join(',');
+                query += ` AND a.provider_id IN (${placeholders})`;
+                params.push(...providerIds);
+            }
+        }
+        // provider_ids yoksa: tüm randevuları göster (filtreleme yok)
+
+        query += ` ORDER BY a.start_at ASC`;
+
+        const [rows] = await pool.execute(query, params);
+
+        const items = rows.map((row) => ({
+            id: row.appointment_id,
+            providerId: row.provider_id,
+            providerType: row.provider_type,
+            staffId: row.staff_id,
+            serviceId: row.service_id,
+            customerId: row.customer_id,
+            title: row.service_name_snapshot,
+            customerName: row.customer_name,
+            start: row.start_at,
+            end: row.end_at,
+            status: row.status,
+            servicePrice: row.service_price_snapshot,
+        }));
+
+        return res.json({ ok: true, items });
+    }),
+
+    /**
      * GET /api/appointments/panel/:id
      * Returns appointment details by ID
      */
@@ -1613,6 +1691,7 @@ const BookingControllers = {
         const timeStr = String(body.time || "").trim();
         const endTimeStr = body.endTime ? String(body.endTime).trim() : null;
         const serviceId = body.serviceId ? Number(body.serviceId) : null;
+        const requestedProviderId = body.provider_id ? Number(body.provider_id) : null;
         const requestedStaffIdRaw = body.staffId;
         const requestedStaffId = requestedStaffIdRaw ? Number(requestedStaffIdRaw) : null;
 
@@ -1648,10 +1727,22 @@ const BookingControllers = {
             const ap = rows[0];
             if (!ap) throw httpError(404, "Appointment not found");
 
+            // Hangi provider kullanılacak: body'deki provider_id öncelikli, yoksa token'dan
+            let targetProviderId = staffId;
+            if (requestedProviderId) {
+                // provider_id body'den geldi - admin kontrolü gerekiyor mu kontrol et
+                if (Number(ap.provider_id) !== requestedProviderId) {
+                    if (!isAdmin) {
+                        await requireAdminUser(decoded, businessId, branchId);
+                    }
+                    targetProviderId = requestedProviderId;
+                }
+            }
+
             // Check permission
-            const provider = await ensureStaffProvider(staffId);
+            const provider = await ensureStaffProvider(targetProviderId);
             if (!provider) throw httpError(404, "Provider not found");
-            if (!isAdmin && Number(ap.provider_id) !== Number(provider.id)) {
+            if (!isAdmin && !requestedProviderId && Number(ap.provider_id) !== Number(provider.id)) {
                 throw httpError(403, "Not allowed");
             }
 
@@ -1716,20 +1807,23 @@ const BookingControllers = {
             await conn.commit();
 
             // Müşteriye SMS ile bilgi ver
-            try {
-                const [cRows] = await pool.execute(
-                    `SELECT phone, display_name FROM customers WHERE id = ? LIMIT 1`,
-                    [ap.customer_id]
-                );
-                const customer = cRows[0];
-                if (customer?.phone) {
-                    const oldTime = t.formatDateTime(ap.start_at);
-                    const newTime = t.formatDateTime(startAt);
-                    const msg = `Randevunuz ${oldTime} yerine ${newTime} saatine taşılmıştır. Saygılarımızla.`;
-                    await sendSms({ phone: customer.phone, message: msg, type: "general" });
+            const timeChanged = String(ap.start_at) !== startAt;
+            if (timeChanged) {
+                try {
+                    const [cRows] = await pool.execute(
+                        `SELECT phone, display_name FROM customers WHERE id = ? LIMIT 1`,
+                        [ap.customer_id]
+                    );
+                    const customer = cRows[0];
+                    if (customer?.phone) {
+                        const oldTime = t.formatDateTime(ap.start_at);
+                        const newTime = t.formatDateTime(startAt);
+                        const msg = `Randevunuz ${oldTime} yerine ${newTime} saatine taşınmıştır. Saygılarımızla.`;
+                        await sendSms({ phone: customer.phone, message: msg, type: "general" });
+                    }
+                } catch (smsErr) {
+                    console.error("SMS gönderim hatası:", smsErr);
                 }
-            } catch (smsErr) {
-                console.error("SMS gönderim hatası:", smsErr);
             }
 
             emitAppointment({
@@ -1882,6 +1976,22 @@ const BookingControllers = {
                 no_show_count: noShowCount
             }
         });
+    }),
+
+    customerList: asyncWrap(async (req, res) => {
+        const { q = "", limit = 50 } = req.query;
+        const searchTerm = `%${q}%`;
+        const safeLimit = parseInt(limit, 10) || 50;
+        const [rows] = await pool.query(
+            `SELECT id, phone, display_name, is_active, created_at
+             FROM customers
+             WHERE is_active = 1
+               AND (phone LIKE ? OR display_name LIKE ?)
+             ORDER BY created_at DESC
+             LIMIT ?`,
+            [searchTerm, searchTerm, safeLimit]
+        );
+        return res.json({ ok: true, items: rows });
     }),
 
     customerStats: asyncWrap(async (req, res) => {
@@ -4452,7 +4562,8 @@ const ScopedControllers = {
                 appointment_id: appointmentId,
                 phone: phone,
                 message: msg,
-                type: "reminder"
+                type: "reminder",
+                source: "manual"
             });
             return res.json({ ok: true, message: "SMS gonderildi" });
         } catch (smsErr) {

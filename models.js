@@ -324,6 +324,7 @@ const Models = {
             "sent_at",
             "created_at",
             "updated_at",
+            "source",
         ],
     }),
 

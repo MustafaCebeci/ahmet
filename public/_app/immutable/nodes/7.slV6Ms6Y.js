@@ -1,32 +1,4 @@
-<!doctype html>
-<html lang="tr">
-	<head>
-		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-		
-		<link href="./_app/immutable/assets/0.CHeBMvx5.css" rel="stylesheet">
-		<link href="./_app/immutable/assets/7.Bdxop0sq.css" rel="stylesheet">
-		<link rel="modulepreload" href="./_app/immutable/entry/start.BZzHScYq.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/Ci-jgzHC.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/Bd83oD_k.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/C4BT6wkS.js">
-		<link rel="modulepreload" href="./_app/immutable/entry/app.G9IpcMBE.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/PPVm8Dsz.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/dLUKugWw.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/CKe8uAA2.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/DJsTFRF9.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/D9q74427.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/Cu3LK-Ds.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/DuRwaK8G.js">
-		<link rel="modulepreload" href="./_app/immutable/nodes/0.C7hBTbkw.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/B50MJOlB.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/DVusdgP5.js">
-		<link rel="modulepreload" href="./_app/immutable/nodes/7.slV6Ms6Y.js">
-		<link rel="modulepreload" href="./_app/immutable/chunks/BZk_tpuy.js"><!--12qhfyh--><link rel="icon" href="/_app/immutable/assets/favicon.DbxurHg7.svg"/><!----><!--kpcgds--><meta name="description" content="Gizlilik Politikası - [Uygulama Adı]"/><!----><title>Gizlilik Politikası</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-	</head>
-	<body data-sveltekit-preload-data="hover">
-		<div style="display: contents"><!--[--><!--[--><!----><!----><section class="page svelte-kpcgds"><header class="header"><div class="badge svelte-kpcgds">POLICY</div> <h1 class="svelte-kpcgds">Gizlilik Politikası</h1> <p class="sub svelte-kpcgds">Bu gizlilik politikası, <strong>[Uygulama Adı]</strong>’nın kullanıcı gizliliğine
+import{f as e,a as l}from"../chunks/CKe8uAA2.js";import"../chunks/BZk_tpuy.js";import{e as n,ap as t}from"../chunks/Bd83oD_k.js";import{h as k}from"../chunks/B50MJOlB.js";var c=e('<meta name="description" content="Gizlilik Politikası - [Uygulama Adı]"/>'),d=e(`<section class="page svelte-kpcgds"><header class="header"><div class="badge svelte-kpcgds">POLICY</div> <h1 class="svelte-kpcgds">Gizlilik Politikası</h1> <p class="sub svelte-kpcgds">Bu gizlilik politikası, <strong>[Uygulama Adı]</strong>’nın kullanıcı gizliliğine
       verdiği önemi ve kişisel verilerin nasıl korunduğunu açıklar.</p> <div class="meta svelte-kpcgds"><span>Son güncelleme: <strong>[GG.AA.YYYY]</strong></span> <span class="dot">•</span> <span>Yürürlük tarihi: <strong>[GG.AA.YYYY]</strong></span></div></header> <main class="card svelte-kpcgds"><nav class="toc svelte-kpcgds" aria-label="İçindekiler"><a href="#genel" class="svelte-kpcgds">1. Genel İlkeler</a> <a href="#toplanan" class="svelte-kpcgds">2. Toplanan Bilgiler</a> <a href="#kullanim" class="svelte-kpcgds">3. Kullanım Amaçları</a> <a href="#guvenlik" class="svelte-kpcgds">4. Veri Güvenliği</a> <a href="#ucuncu" class="svelte-kpcgds">5. Üçüncü Taraflar</a> <a href="#saklama" class="svelte-kpcgds">6. Saklama ve Silme</a> <a href="#degisiklik" class="svelte-kpcgds">7. Politika Değişiklikleri</a> <a href="#iletisim" class="svelte-kpcgds">8. İletişim</a></nav> <article class="content svelte-kpcgds"><h2 id="genel">1. Genel İlkeler</h2> <p class="svelte-kpcgds"><strong>[Uygulama Adı]</strong>, kullanıcılarının gizliliğini korumayı temel ilke
         olarak benimser. Kişisel veriler; hukuka, dürüstlük kurallarına ve
         KVKK’ya uygun olarak işlenir.</p> <h2 id="toplanan">2. Toplanan Bilgiler</h2> <p class="svelte-kpcgds">Uygulama kapsamında aşağıdaki bilgiler toplanabilir:</p> <ul><li class="svelte-kpcgds"><strong>Telefon numarası</strong> (hesap oluşturma ve giriş doğrulama)</li> <li class="svelte-kpcgds"><strong>Teknik veriler</strong> (IP adresi, işlem zamanı, cihaz bilgisi gibi loglar)</li></ul> <h2 id="kullanim">3. Bilgilerin Kullanım Amaçları</h2> <ul><li class="svelte-kpcgds">Kullanıcı hesabının oluşturulması ve yönetilmesi</li> <li class="svelte-kpcgds">SMS ile tek kullanımlık doğrulama kodu (OTP) gönderilmesi</li> <li class="svelte-kpcgds">Hizmet güvenliğinin sağlanması</li> <li class="svelte-kpcgds">Yetkisiz kullanım ve kötüye kullanımın önlenmesi</li></ul> <h2 id="guvenlik">4. Veri Güvenliği</h2> <p class="svelte-kpcgds">Kişisel verilerinizin güvenliği için gerekli teknik ve idari önlemler alınmaktadır.
@@ -37,29 +9,4 @@
         belirtilen süreler kadar saklanır. Hesap silme talebi halinde, yasal yükümlülükler
         saklı kalmak kaydıyla veriler silinir veya anonim hale getirilir.</p> <h2 id="degisiklik">7. Politika Değişiklikleri</h2> <p class="svelte-kpcgds">Bu gizlilik politikası, hizmetlerde veya yasal yükümlülüklerde meydana gelen
         değişikliklere bağlı olarak güncellenebilir. Güncel sürüm uygulama üzerinden
-        her zaman erişilebilir olacaktır.</p> <h2 id="iletisim">8. İletişim</h2> <p class="svelte-kpcgds">Gizlilik politikası ile ilgili sorularınızı <a class="link svelte-kpcgds" href="mailto:[iletisim@domain.com]">[iletisim@domain.com]</a> adresi üzerinden iletebilirsiniz.</p> <footer class="footer"><div class="divider svelte-kpcgds"></div> <p class="muted svelte-kpcgds">Bu metin bilgilendirme amaçlıdır ve hukuki danışmanlık niteliği taşımaz.</p></footer></article></main></section><!----><!----><!----><!--]--> <!--[!--><!--]--><!--]-->
-			
-			<script>
-				{
-					__sveltekit_1lzcxyz = {
-						base: new URL(".", location).pathname.slice(0, -1)
-					};
-
-					const element = document.currentScript.parentElement;
-
-					Promise.all([
-						import("./_app/immutable/entry/start.BZzHScYq.js"),
-						import("./_app/immutable/entry/app.G9IpcMBE.js")
-					]).then(([kit, app]) => {
-						kit.start(app, element, {
-							node_ids: [0, 7],
-							data: [null,null],
-							form: null,
-							error: null
-						});
-					});
-				}
-			</script>
-		</div>
-	</body>
-</html>
+        her zaman erişilebilir olacaktır.</p> <h2 id="iletisim">8. İletişim</h2> <p class="svelte-kpcgds">Gizlilik politikası ile ilgili sorularınızı <a class="link svelte-kpcgds" href="mailto:[iletisim@domain.com]">[iletisim@domain.com]</a> adresi üzerinden iletebilirsiniz.</p> <footer class="footer"><div class="divider svelte-kpcgds"></div> <p class="muted svelte-kpcgds">Bu metin bilgilendirme amaçlıdır ve hukuki danışmanlık niteliği taşımaz.</p></footer></article></main></section>`);function v(i){var a=d();k("kpcgds",s=>{var r=c();n(()=>{t.title="Gizlilik Politikası"}),l(s,r)}),l(i,a)}export{v as component};

@@ -49,6 +49,7 @@ router.post("/appointments/success-details", BookingControllers.successDetails);
 router.post("/appointments/success-details-all", BookingControllers.successDetailsAll);
 router.post("/appointments/cancel", BookingControllers.cancel);
 router.get("/appointments/panel", BookingControllers.panelList);
+router.post("/appointments/v2/panel", BookingControllers.panelListV2);
 router.get("/appointments/panel/:id", BookingControllers.panelGetById);
 router.post("/appointments/panel/create", BookingControllers.panelCreate);
 router.post("/appointments/panel/create-direct", BookingControllers.panelCreateDirect);
@@ -61,6 +62,7 @@ router.get("/customers/blacklist", BookingControllers.blacklistList);
 router.post("/customers/blacklist/remove", BookingControllers.blacklistRemove);
 router.get("/customers/flags/:customerId", BookingControllers.customerFlags);
 router.get("/customers/stats", BookingControllers.customerStats);
+router.get("/customers", BookingControllers.customerList);
 router.post("/appointments/report-month", BookingControllers.reportMonth);
 router.post("/appointments/:id/send-reminder", ScopedControllers.sendAppointmentReminder);
 
