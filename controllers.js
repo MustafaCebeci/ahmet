@@ -1727,23 +1727,22 @@ const BookingControllers = {
             const ap = rows[0];
             if (!ap) throw httpError(404, "Appointment not found");
 
-            // Hangi provider kullanılacak: body'deki provider_id öncelikli, yoksa token'dan
-            let targetProviderId = staffId;
+            // Provider değişikliği kontrolü: body.provider_id varsa kullan, yoksa mevcut korunsun
+            let targetProviderId = null;
             if (requestedProviderId) {
-                // provider_id body'den geldi - admin kontrolü gerekiyor mu kontrol et
-                if (Number(ap.provider_id) !== requestedProviderId) {
-                    if (!isAdmin) {
-                        await requireAdminUser(decoded, businessId, branchId);
-                    }
-                    targetProviderId = requestedProviderId;
+                targetProviderId = requestedProviderId;
+                if (Number(ap.provider_id) !== targetProviderId) {
+                    await requireAdminUser(decoded, businessId, branchId);
                 }
             }
 
-            // Check permission
-            const provider = await ensureStaffProvider(targetProviderId);
-            if (!provider) throw httpError(404, "Provider not found");
-            if (!isAdmin && !requestedProviderId && Number(ap.provider_id) !== Number(provider.id)) {
-                throw httpError(403, "Not allowed");
+            // Provider'ı al: değişiklik varsa yeni provider, yoksa mevcut provider korunsun
+            let provider;
+            if (targetProviderId) {
+                provider = await ensureStaffProvider(targetProviderId);
+                if (!provider) throw httpError(404, "Provider not found");
+            } else {
+                provider = { id: Number(ap.provider_id) };
             }
 
             // Get service duration
