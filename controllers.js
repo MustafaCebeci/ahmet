@@ -3890,8 +3890,8 @@ const ScopedControllers = {
 
             const [result] = await conn.execute(
                 `INSERT INTO closures
-                 (scope, provider_id, start_at, end_at, is_all_day, status, reason, note, created_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 (scope, provider_id, start_at, end_at, is_all_day, status, reason, note)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     scope,
                     scope === 'global' ? null : providerId,
@@ -3900,8 +3900,7 @@ const ScopedControllers = {
                     isAllDay,
                     status,
                     reason,
-                    note,
-                    decoded.sub
+                    note
                 ]
             );
             const closureId = result.insertId ?? null;
@@ -4676,7 +4675,8 @@ const ScopedControllers = {
         if (!psRows.length) throw httpError(404, "Period setting not found");
 
         const ps = psRows[0];
-        const currentData = JSON.parse(ps.data_json || "{}");
+        const rawDataJson = ps.data_json;
+        const currentData = typeof rawDataJson === 'string' ? JSON.parse(rawDataJson || "{}") : (rawDataJson || {});
         const currentSettings = currentData.settings || {};
 
         // Eski ve yeni saatleri karşılaştır

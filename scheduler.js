@@ -214,7 +214,7 @@ async function sendReminders() {
 
             // SMS mesajı oluştur
             const timeStr = t.formatDateTime(appt.start_at);
-            const message = `Merhabo ${appt.name}, ${timeStr} randeviniz hatırlatmak isteriz. Gelemeyecekseniz lütfen iptal edin.`;
+            const message = `Ahmet Şanlı Hair Salon - Merhabo ${appt.name}, ${timeStr} randeviniz hatırlatmak isteriz. Gelemeyecekseniz lütfen iptal edin.`;
 
             try {
                 await sendSms({
