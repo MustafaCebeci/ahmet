@@ -1029,7 +1029,7 @@ const BookingControllers = {
                         customerPhone = cRows[0]?.phone ?? null;
                     }
                     if (customerPhone) {
-                        const msg = `Randevunuz olusturuldu. Tarih: ${dateStr} ${timeStr}. Hizmet: ${svc.name}.`;
+                        const msg = `Ahmet Şanlı Hair Salon - Randevunuz olusturuldu. Tarih: ${dateStr} ${timeStr}. Hizmet: ${svc.name}.`;
                         await sendSms({
                             appointment_id: appointmentId,
                             phone: customerPhone,
@@ -1052,7 +1052,7 @@ const BookingControllers = {
                     );
                     const staffPhone = staffRows[0]?.phone ?? null;
                     if (staffPhone) {
-                        const msg = `Yeni randevu: ${svc.name}, ${dateStr} ${timeStr}.`;
+                        const msg = `Ahmet Şanlı Hair Salon - Yeni randevu: ${svc.name}, ${dateStr} ${timeStr}.`;
                         await sendSms({
                             appointment_id: appointmentId,
                             phone: staffPhone,
@@ -1433,7 +1433,8 @@ const BookingControllers = {
                 a.service_price_snapshot,
                 a.customer_note,
                 c.display_name AS customer_name,
-                c.nickname AS customer_nickname
+                c.nickname AS customer_nickname,
+                c.phone AS customer_phone
             FROM appointments a
             LEFT JOIN customers c ON c.id = a.customer_id
             LEFT JOIN service_providers sp ON sp.id = a.provider_id
@@ -1465,6 +1466,7 @@ const BookingControllers = {
             title: row.service_name_snapshot,
             customerName: row.customer_name,
             customerNickname: row.customer_nickname ?? null,
+            customerPhone: row.customer_phone ?? null,
             customerNote: row.customer_note ?? null,
             start: row.start_at,
             end: row.end_at,
@@ -1870,7 +1872,7 @@ const BookingControllers = {
                     if (customer?.phone) {
                         const oldTime = t.formatDateTime(ap.start_at);
                         const newTime = t.formatDateTime(startAt);
-                        const msg = `Randevunuz ${oldTime} yerine ${newTime} saatine taşınmıştır. Saygılarımızla.`;
+                        const msg = `Ahmet Şanlı Hair Salon - Randevunuz ${oldTime} yerine ${newTime} saatine taşınmıştır. Saygılarımızla.`;
                         await sendSms({ phone: customer.phone, message: msg, type: "general" });
                     }
                 } catch (smsErr) {
@@ -4905,7 +4907,7 @@ const ScopedControllers = {
         const timeStr = t.formatTime(startDt);
 
         // Hatırlatma mesajı oluştur
-        const msg = `Merhaba ${appt.customer_name || "Musteri"}, randevunuz ${dateStr} tarihinde ${timeStr} saatinde ${appt.service_name || "hizmet"} icin hatirlatilir. Sagliklar!`;
+        const msg = `Merhaba ${appt.customer_name || "Musteri"}, randevunuz ${dateStr} tarihinde ${timeStr} saatinde ${appt.service_name || "hizmet"} icin hatirlatilir. - Ahmet Şanlı Hair Salon`;
 
         try {
             await sendSms({
