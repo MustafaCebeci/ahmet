@@ -1440,6 +1440,7 @@ const BookingControllers = {
             LEFT JOIN customers c ON c.id = a.customer_id
             LEFT JOIN service_providers sp ON sp.id = a.provider_id
             WHERE a.start_at >= ? AND a.start_at <= ?
+                AND status in ('confirmed', 'completed')
         `;
         const params = [startDateTime, endDateTime];
 
