@@ -17,7 +17,7 @@ function sha256(input) {
 }
 
 function otpMessage(code) {
-    return `Giriş kodunuz: ${code}. Bu kod 2 dakika geçerlidir. - Ahmet Şanlı Hair Salon`;
+    return `Giriş kodunuz: ${code}. Bu kod 1 dakika geçerlidir.- Ahmet Şanlı Hair Salon`;
 }
 
 /**

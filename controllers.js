@@ -944,16 +944,17 @@ const BookingControllers = {
               customer_note
             )
           VALUES
-            (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 // end_at expr: DATE_ADD(start_at, durationMin)
                 [
                     provider.id,
                     serviceId,
-                    isCustom ? 1 : 0,
+                    0,
                     customerId,
                     startAt,
                     startAt,
+                    isCustom ? durationMin : svc.duration_minutes,
                     isCustom ? (body.custom_service_name ?? "Özel Randevu") : svc.name,
                     isCustom ? durationMin : svc.duration_minutes,
                     effectivePrice,
@@ -4907,7 +4908,7 @@ const ScopedControllers = {
         const timeStr = t.formatTime(startDt);
 
         // Hatırlatma mesajı oluştur
-        const msg = `Merhaba ${appt.customer_name || "Musteri"}, randevunuz ${dateStr} tarihinde ${timeStr} saatinde ${appt.service_name || "hizmet"} icin hatirlatilir. - Ahmet Şanlı Hair Salon`;
+        const msg = `Ahmet Şanlı Hair Salon - Merhaba ${appt.customer_name || "Musteri"}, randevunuz ${dateStr} tarihinde ${timeStr} saatinde ${appt.service_name || "hizmet"} icin hatirlatilir. Sagliklar!`;
 
         try {
             await sendSms({
