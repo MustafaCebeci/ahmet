@@ -1440,7 +1440,7 @@ const BookingControllers = {
             LEFT JOIN customers c ON c.id = a.customer_id
             LEFT JOIN service_providers sp ON sp.id = a.provider_id
             WHERE a.start_at >= ? AND a.start_at <= ?
-                AND status in ('confirmed', 'completed', 'no_show')
+                And status IN ('confirmed', 'completed')
         `;
         const params = [startDateTime, endDateTime];
 
@@ -2039,7 +2039,7 @@ const BookingControllers = {
         const searchTerm = `%${q}%`;
         const safeLimit = parseInt(limit, 10) || 50;
         const [rows] = await pool.query(
-            `SELECT id, phone, display_name, is_active, created_at
+            `SELECT id, phone, display_name, nickname, is_active, created_at
              FROM customers
              WHERE is_active = 1
                AND (phone LIKE ? OR display_name LIKE ?)
@@ -2660,23 +2660,6 @@ const BookingControllers = {
                 [provider.id, serviceId]
             );
             if (!psRows.length) throw httpError(400, "Provider does not provide this service");
-        }
-
-        // Closure kontrolu
-        const [clRows] = await pool.execute(
-            `SELECT id FROM closures
-             WHERE status = 'active'
-               AND start_at < ?
-               AND end_at > ?
-               AND (
-                 (scope = 'global' AND provider_id IS NULL) OR
-                 (scope = 'provider' AND provider_id = ?)
-               )
-             LIMIT 1`,
-            [slotRangeEnd, slotRangeStart, provider.id]
-        );
-        if (clRows.length) {
-            throw httpError(400, "Provider is not available at the selected time");
         }
 
         // Mevcut appointment kontrolu (cakisma)

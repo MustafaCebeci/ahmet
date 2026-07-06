@@ -1,0 +1,1 @@
+const a="Berber Vakti",e={name:"Ahmet Şanlı Hair Salon",tagline:"Samsun İlkadım'da profesyonel bakım",address:"KILIÇDEDE MAH. İSTİKLAL CAD. OSMAN ARICA APARTMANI NO: 191 İÇ KAPI NO: 7 İLKADIM / SAMSUN",phone:"+90 (542) 264 74 55",email:"info@elitebarbers.com",mapUrl:"https://maps.google.com/maps?q=41.0082,28.9784",founded:2014};export{a as A,e as B};

@@ -187,17 +187,25 @@ class NetGsmProvider extends SmsProvider {
 
 /**
  * Factory: SMS provider oluştur
- * SMS_PROVIDER env değişkeniyle seçim yapılır
- * Varsayılan: netgsm
+ * NODE_ENV'e göre otomatik seçim:
+ *   - development → mesajpaneli (test için)
+ *   - production  → netgsm (gerçek SMS)
+ * SMS_PROVIDER env değişkeni ile manuel override desteklenir
  */
 function createSmsProvider() {
-    const provider = env("SMS_PROVIDER", "netgsm");
-    console.log("[SMS Provider] Seçilen provider:", provider, "| Env değeri:", process.env.SMS_PROVIDER);
+    const nodeEnv = env("NODE_ENV", "production");
+
+    // NODE_ENV'e göre varsayılan provider belirle
+    const defaultProvider = (nodeEnv === "development") ? "mesajpaneli" : "netgsm";
+
+    // SMS_PROVIDER varsa override et (manuel tercih desteklenir)
+    const provider = env("SMS_PROVIDER", defaultProvider);
+
+    console.log("[SMS Provider] NODE_ENV:", nodeEnv, "| Seçilen:", provider);
 
     if (provider === "mesajpaneli") {
         return new MesajPaneliProvider();
     }
-
     return new NetGsmProvider();
 }
 

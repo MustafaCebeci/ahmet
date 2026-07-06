@@ -139,7 +139,7 @@ app.use((req, res, next) => {
     return res.redirect(302, loginRedirectForPath(pathname));
   }
 
-  if (pathname.startsWith("/bPanel") && decoded.typ !== "user") {
+  if (pathname.startsWith("/bPanel") && decoded.typ !== "user" && decoded.typ !== "barber") {
     return res.redirect(302, "/login_barber");
   }
   if (pathname.startsWith("/randevu") && decoded.typ !== "customer") {
