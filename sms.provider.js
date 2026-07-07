@@ -1,5 +1,5 @@
 // sms.provider.js
-// SMS Provider soyut katmanı - MesajPaneli ve NetGSM desteği
+// SMS Provider - NetGSM desteği
 const axios = require('axios');
 const https = require('https');
 const { env } = require("./config");
@@ -11,97 +11,7 @@ class SmsProvider {
 }
 
 /**
- * MesajPaneli Sağlayıcısı
- * Mevcut MesajPaneliApi.js mantığını korur
- */
-class MesajPaneliProvider extends SmsProvider {
-    constructor() {
-        super();
-        const user = env("SMS_USER", "");
-        const pass = env("SMS_PASS", "");
-        const endpoint = env("SMS_ENDPOINT", "https://api.mesajpaneli.com/json_api/api");
-        const verifySSL = String(env("SMS_VERIFY_SSL", "true")).toLowerCase() !== "false";
-
-        this.credentials = { username: user, password: pass };
-        this.endpoint = endpoint;
-        this.verifySSL = verifySSL;
-        this.timeout = 50_000;
-    }
-
-    async topluMesajGonder(msgBaslik, topluMesaj, tr = false, start = null) {
-        if (!msgBaslik || String(msgBaslik).length < 3) {
-            throw new Error("Başlık minimum 3 karakterden oluşmalıdır.");
-        }
-        if (!topluMesaj?.metin || !topluMesaj?.telefon) {
-            throw new Error("Mesaj metni ve telefon zorunludur.");
-        }
-
-        const payload = {
-            user: { name: this.credentials.username, pass: this.credentials.password },
-            msgBaslik: msgBaslik,
-            tr: !!tr,
-            msgData: [
-                {
-                    msg: topluMesaj.metin,
-                    tel: [String(topluMesaj.telefon)],
-                },
-            ],
-        };
-
-        if (start != null) payload.start = start;
-
-        const b64 = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
-        const form = new URLSearchParams({ data: b64 });
-
-        const httpsAgent = this.verifySSL
-            ? undefined
-            : new https.Agent({ rejectUnauthorized: false });
-
-        console.log("[MesajPaneli Request]", {
-            url: this.endpoint,
-            payload: {
-                user: { name: this.credentials.username, pass: "***" },
-                msgBaslik,
-                tr,
-                msgData: [{ msg: topluMesaj.metin, tel: [topluMesaj.telefon] }],
-            }
-        });
-
-        const res = await axios.post(this.endpoint, form, {
-            timeout: this.timeout,
-            headers: { "User-Agent": "NODE_API" },
-            httpsAgent,
-        });
-
-        console.log("[MesajPaneli Response]", {
-            status: res.status,
-            data: res.data,
-        });
-
-        const decoded = Buffer.from(String(res.data), "base64").toString("utf8");
-
-        let json;
-        try {
-            json = JSON.parse(decoded);
-        } catch {
-            throw new Error("API response JSON parse edilemedi: " + decoded);
-        }
-
-        if (json?.status === false) {
-            throw new Error(json?.error || "Girilen bilgileri kontrol ediniz");
-        }
-
-        return json;
-    }
-
-    getProviderName() {
-        return "mesajpaneli";
-    }
-}
-
-/**
  * NetGSM Sağlayıcısı
- * netgsm_test/app.js referans alınarak implement edildi
  */
 class NetGsmProvider extends SmsProvider {
     constructor() {
@@ -187,30 +97,13 @@ class NetGsmProvider extends SmsProvider {
 
 /**
  * Factory: SMS provider oluştur
- * NODE_ENV'e göre otomatik seçim:
- *   - development → mesajpaneli (test için)
- *   - production  → netgsm (gerçek SMS)
- * SMS_PROVIDER env değişkeni ile manuel override desteklenir
  */
 function createSmsProvider() {
-    const nodeEnv = env("NODE_ENV", "production");
-
-    // NODE_ENV'e göre varsayılan provider belirle
-    const defaultProvider = (nodeEnv === "development") ? "mesajpaneli" : "netgsm";
-
-    // SMS_PROVIDER varsa override et (manuel tercih desteklenir)
-    const provider = env("SMS_PROVIDER", defaultProvider);
-
-    console.log("[SMS Provider] NODE_ENV:", nodeEnv, "| Seçilen:", provider);
-
-    if (provider === "mesajpaneli") {
-        return new MesajPaneliProvider();
-    }
     return new NetGsmProvider();
 }
 
 /**
- * Mesaj yapısı (MesajPaneliApi.js ile uyumlu)
+ * Mesaj yapısı
  */
 class TopluMesaj {
     constructor(metin, telefon) {
@@ -221,7 +114,6 @@ class TopluMesaj {
 
 module.exports = {
     SmsProvider,
-    MesajPaneliProvider,
     NetGsmProvider,
     TopluMesaj,
     createSmsProvider,

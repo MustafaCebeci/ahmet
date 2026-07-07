@@ -4,7 +4,7 @@ const { pool } = require("./models");
 const t = require("./temporal_api.utils");
 const { getMailer, env } = require("./config");
 
-// SMS Provider (MesajPaneli / NetGSM soyutlaması)
+// SMS Provider (NetGSM)
 const { createSmsProvider, TopluMesaj } = require("./sms.provider.js");
 
 // --- OTP yardımcıları ---
@@ -79,7 +79,7 @@ async function logSmsToDb({
     to_phone,
     body,
     type = "otp",
-    provider = "mesajpaneli",
+    provider = "netgsm",
     status = "sent",
     provider_msg_id = null,
     error_message = null,
@@ -113,8 +113,7 @@ async function sendMail({ to, subject, text }) {
 }
 
 /**
- * SMS API instance (provider factory)
- * SMS_PROVIDER env ile MesajPaneli veya NetGSM seçilir
+ * SMS API instance (provider factory - NetGSM)
  */
 function createSmsApi() {
     return createSmsProvider();
@@ -122,16 +121,14 @@ function createSmsApi() {
 
 /**
  * SMS gönder (GERÇEK)
- * - MesajPaneliApi + TopluMesaj kullanım stili
+ * - NetGSM üzerinden gönderir
  * - sms_messages loglar
  */
 async function sendSms({ appointment_id = null, phone, message, type = "otp", source = "system" }) {
     const smsApi = createSmsApi();
     const providerName = smsApi.getProviderName();
 
-    const baslik = providerName === "netgsm"
-        ? env("NETGSM_HEADER", "")
-        : env("SMS_BASLIK", "TBS AV.ORT.");
+    const baslik = env("NETGSM_HEADER", "");
 
     // "05xxxxxxxxx" veya "5xxxxxxxxx" formatı sende nasıl ise onu gönder.
     // Senin örnek: 5467473915 (başında 0 yok) -> aynen geçiyoruz.

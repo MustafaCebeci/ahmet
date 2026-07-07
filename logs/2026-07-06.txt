@@ -1,0 +1,5 @@
+[2026-07-06T19:17:13.309] ::1 GET /_app/immutable/assets/ProviderCalendar.C4mevpaa.css "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+[2026-07-06T19:17:13.315] ::1 GET /_app/immutable/assets/5.Ncmljyyj.css "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+[2026-07-06T19:17:13.377] ::1 GET /sounds/kadin.wav "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+[2026-07-06T19:17:16.522] ::1 GET /bPanel "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+[2026-07-06T19:17:16.615] ::1 GET /_app/immutable/assets/5.Ncmljyyj.css "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"

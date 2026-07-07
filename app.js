@@ -9,6 +9,7 @@ const jwt = require("jsonwebtoken");
 const { pool } = require("./models");
 const t = require("./temporal_api.utils");
 // scheduler.js artık harici cronjob manager tarafından tetikleniyor
+const { startScheduler } = require("./cron");
 const { logRequest } = require("./logger.js");
 
 const app = express();
@@ -224,6 +225,7 @@ app.use((err, req, res, next) => {
 });
 
 // -------- Server --------
+startScheduler();
 const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, () => {
     console.log(`Server running: http://localhost:${PORT}`);

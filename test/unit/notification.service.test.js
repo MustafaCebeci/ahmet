@@ -13,9 +13,9 @@ vi.mock('../../config.js', () => ({
       'SMS_USER': 'testuser',
       'SMS_PASS': 'testpass',
       'SMS_BASLIK': 'TEST',
-      'SMS_ENDPOINT': 'https://test.api.mesajpaneli.com',
+      'SMS_ENDPOINT': 'https://test.api.netgsm.com',
       'SMS_VERIFY_SSL': 'false',
-      'SMS_PROVIDER': 'mesajpaneli',
+      'SMS_PROVIDER': 'netgsm',
       'NETGSM_USER': 'testuser',
       'NETGSM_PASS': 'testpass',
       'NETGSM_HEADER': 'TEST',
@@ -35,7 +35,7 @@ vi.mock('../../config.js', () => ({
 vi.mock('../../sms.provider.js', () => ({
   createSmsProvider: vi.fn().mockImplementation(() => ({
     topluMesajGonder: vi.fn().mockResolvedValue({ status: true, msg_id: 'mock-123' }),
-    getProviderName: vi.fn().mockReturnValue('mesajpaneli'),
+    getProviderName: vi.fn().mockReturnValue('netgsm'),
   })),
   TopluMesaj: vi.fn().mockImplementation((metin, telefon) => ({ metin, telefon })),
 }));
@@ -189,7 +189,7 @@ describe('logSmsToDb()', () => {
       to_phone: '5467473915',
       body: 'Test message',
       type: 'otp',
-      provider: 'mesajpaneli',
+      provider: 'netgsm',
       status: 'sent',
       provider_msg_id: 'msg-123',
     });
@@ -222,7 +222,7 @@ describe('sendSms()', () => {
     vi.clearAllMocks();
   });
 
-  it('sends SMS via MesajPaneliApi', async () => {
+  it('sends SMS via NetGSMApi', async () => {
     const result = await notificationService.sendSms({
       phone: '5467473915',
       message: 'Test message',
@@ -250,7 +250,7 @@ describe('sendSms()', () => {
     const { createSmsProvider } = require('../../sms.provider.js');
     createSmsProvider.mockImplementation(() => ({
       topluMesajGonder: vi.fn().mockRejectedValue(new Error('API Error')),
-      getProviderName: vi.fn().mockReturnValue('mesajpaneli'),
+      getProviderName: vi.fn().mockReturnValue('netgsm'),
     }));
 
     pool.execute.mockResolvedValue([{ affectedRows: 1 }]);
