@@ -811,10 +811,10 @@ const BookingControllers = {
         if (startMin < openMin || startMin >= closeMin) {
             throw httpError(400, "Selected time is outside working hours");
         }
-        // 5 dk slot kurali: dakika acilisa gore 5 dk carpani olmali
-        if ((startMin - openMin) % VIRTUAL_SLOT_MINUTES !== 0) {
-            throw httpError(400, "Selected time is not aligned with 5-minute slots");
-        }
+        // 5 dk slot kurali gecici olarak devre disi birakildi
+        // if ((startMin - openMin) % VIRTUAL_SLOT_MINUTES !== 0) {
+        //     throw httpError(400, "Selected time is not aligned with 5-minute slots");
+        // }
 
 
         // service doğrula (duration çekme yok)
@@ -2410,14 +2410,12 @@ const BookingControllers = {
 
         const startAt = toSqlDateTime(dateStr, timeStr);
         if (!startAt) throw httpError(400, "Gecersiz date/time");
-        const settingsJson = await getBusinessSettingsJson(businessId);
-        const startHour = String(settingsJson.start_hour ?? "09:00");
         const startMin = parseHHMMToMinutes(timeStr);
-        const openMin = parseHHMMToMinutes(startHour);
-        if (startMin === null || openMin === null) throw httpError(400, "Invalid time format");
-        if ((startMin - openMin) % VIRTUAL_SLOT_MINUTES !== 0) {
-            throw httpError(400, "Selected time is not aligned with 5-minute slots");
-        }
+        if (startMin === null) throw httpError(400, "Invalid time format");
+        // 5 dk slot kurali gecici olarak devre disi birakildi
+        // if (startMin % VIRTUAL_SLOT_MINUTES !== 0) {
+        //     throw httpError(400, "Selected time is not aligned with 5-minute slots");
+        // }
 
         let staffId = Number(staffIdFromToken);
         if (requestedStaffId && requestedStaffId !== staffId) {
@@ -2618,14 +2616,12 @@ const BookingControllers = {
         const startAt = toSqlDateTime(dateStr, timeStr);
         if (!startAt) throw httpError(400, "Gecersiz date/time");
 
-        const settingsJson = await getBusinessSettingsJson(businessId);
-        const startHour = String(settingsJson.start_hour ?? "09:00");
         const startMin = parseHHMMToMinutes(timeStr);
-        const openMin = parseHHMMToMinutes(startHour);
-        if (startMin === null || openMin === null) throw httpError(400, "Invalid time format");
-        if ((startMin - openMin) % VIRTUAL_SLOT_MINUTES !== 0) {
-            throw httpError(400, "Selected time is not aligned with 5-minute slots");
-        }
+        if (startMin === null) throw httpError(400, "Invalid time format");
+        // 5 dk slot kurali gecici olarak devre disi birakildi
+        // if (startMin % VIRTUAL_SLOT_MINUTES !== 0) {
+        //     throw httpError(400, "Selected time is not aligned with 5-minute slots");
+        // }
 
         // Provider dogrula
         const [pRows] = await pool.execute(
@@ -3439,7 +3435,7 @@ const BookingControllers = {
                 status: status
             });
 
-            // Next position - use step (5 min) for virtual slot iteration
+            // Next position
             if (status === 'busy' && busyAppt) {
                 // Jump to end of busy appointment
                 m = parseHHMMToMinutesSimple(busyAppt.end);
@@ -3447,7 +3443,7 @@ const BookingControllers = {
                 // Jump to start of conflicting appointment
                 m = parseHHMMToMinutesSimple(conflictAppt.start);
             } else {
-                m += step;
+                m += slotStep;
             }
         }
 
