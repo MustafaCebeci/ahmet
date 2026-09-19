@@ -2410,9 +2410,12 @@ const BookingControllers = {
 
         const startAt = toSqlDateTime(dateStr, timeStr);
         if (!startAt) throw httpError(400, "Gecersiz date/time");
+        const settingsJson = await getBusinessSettingsJson(businessId);
+        const startHour = String(settingsJson.start_hour ?? "09:00");
         const startMin = parseHHMMToMinutes(timeStr);
-        if (startMin === null) throw httpError(400, "Invalid time format");
-        if (startMin % VIRTUAL_SLOT_MINUTES !== 0) {
+        const openMin = parseHHMMToMinutes(startHour);
+        if (startMin === null || openMin === null) throw httpError(400, "Invalid time format");
+        if ((startMin - openMin) % VIRTUAL_SLOT_MINUTES !== 0) {
             throw httpError(400, "Selected time is not aligned with 5-minute slots");
         }
 
@@ -2615,9 +2618,12 @@ const BookingControllers = {
         const startAt = toSqlDateTime(dateStr, timeStr);
         if (!startAt) throw httpError(400, "Gecersiz date/time");
 
+        const settingsJson = await getBusinessSettingsJson(businessId);
+        const startHour = String(settingsJson.start_hour ?? "09:00");
         const startMin = parseHHMMToMinutes(timeStr);
-        if (startMin === null) throw httpError(400, "Invalid time format");
-        if (startMin % VIRTUAL_SLOT_MINUTES !== 0) {
+        const openMin = parseHHMMToMinutes(startHour);
+        if (startMin === null || openMin === null) throw httpError(400, "Invalid time format");
+        if ((startMin - openMin) % VIRTUAL_SLOT_MINUTES !== 0) {
             throw httpError(400, "Selected time is not aligned with 5-minute slots");
         }
 
@@ -3433,7 +3439,7 @@ const BookingControllers = {
                 status: status
             });
 
-            // Next position
+            // Next position - use step (5 min) for virtual slot iteration
             if (status === 'busy' && busyAppt) {
                 // Jump to end of busy appointment
                 m = parseHHMMToMinutesSimple(busyAppt.end);
@@ -3441,7 +3447,7 @@ const BookingControllers = {
                 // Jump to start of conflicting appointment
                 m = parseHHMMToMinutesSimple(conflictAppt.start);
             } else {
-                m += slotStep;
+                m += step;
             }
         }
 
