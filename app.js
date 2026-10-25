@@ -1,20 +1,42 @@
 // app.js
-require("dotenv").config();
+// Only load dotenv if no DB_NAME is set (avoid double-loading issues)
+if (!process.env.DB_NAME) {
+  require("dotenv").config();
+}
 const express = require("express");
 const path = require("path");
 const router = require("./router.js");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
+const { pathToRegexp } = require("path-to-regexp");
 const { pool } = require("./models");
 const t = require("./temporal_api.utils");
-// scheduler.js artık harici cronjob manager tarafından tetikleniyor
 const { startScheduler } = require("./cron");
+const { ensureSettingsDefaults, getBookingFlowMode } = require("./settingsManager");
 const { logRequest } = require("./logger.js");
 
 const app = express();
 
 // -------- Middlewares --------
+// For webhook routes, capture raw body before JSON parsing (for signature verification)
+app.use((req, res, next) => {
+  if (req.path.startsWith('/webhooks/')) {
+    express.raw({ type: 'application/json', limit: '10mb' })(req, res, (err) => {
+      if (err) return next(err);
+      req._rawBody = req.body; // Buffer
+      try {
+        req.body = JSON.parse(req._rawBody.toString());
+      } catch {
+        req.body = null;
+      }
+      next();
+    });
+  } else {
+    next();
+  }
+});
+
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -24,25 +46,15 @@ const allowedOrigins = [
     "http://localhost:5174",
     "http://localhost:8080",
     "http://localhost:5500",
+    "http://localhost:3001", // Desktop app
 ];
 
-const isDevelopment =
-    String(process.env.NODE_ENV || "").toLowerCase() === "development";
-
-console.log("🔍 NODE_ENV:", process.env.NODE_ENV, "→ isDevelopment:", isDevelopment);
-
-if (isDevelopment) {
-    app.use(cors({
-        origin: (origin, callback) => {
-            // Development'ta tüm origin'lere izin ver (origin yoksa da)
-            callback(null, true);
-        },
-        credentials: true
-    }));
-    console.log("🔧 Development mode: CORS open (dynamic origin)");
-} else {
-    app.use(cors({ origin: allowedOrigins, credentials: true }));
-}
+app.use(
+    cors({
+        origin: allowedOrigins,
+        credentials: true,
+    })
+);
 
 app.use(cookieParser());
 
@@ -68,9 +80,10 @@ const publicPages = new Set([
   "/register",
   "/aydinlatma",
   "/gizlilik",
+  
 ]);
 
-const publicApi = new Set([
+const publicApi = [
   "/api/auth/login",
   "/api/auth/verify",
   "/api/auth/logout",
@@ -79,9 +92,31 @@ const publicApi = new Set([
   "/api/branches/current",
   "/api/services",
   "/api/staff",
+  // Hizli randevu akisi (oturumsuz form): saglayici/hizmet/musaitlik/donem fiyati okuma
+  "/api/service_providers",
+  "/api/provider_services/by-provider",
+  "/api/appointments/slots/generate/v2",
+  "/api/period_settings/for-date",
   "/api/branch_closures/today",
   "/api/cron/jobs",
-]);
+  "/api/desktop/events/stream",
+  "/api/desktop/events/ack",
+  "/api/desktop/events/action",
+  "/api/desktop/appointments/today",
+  "/api/desktop/appointments/:id",
+  // WhatsApp Cloud API Webhooks (Meta sends these without JWT)
+  "/webhooks/whatsapp",
+];
+
+// Compile publicApi patterns to regex matchers at startup — runs once
+const publicApiMatchers = publicApi.map((pattern) => {
+  const { regexp, keys } = pathToRegexp(pattern);
+  return { pattern, regexp, keys };
+});
+
+function isPublicApi(pathname) {
+  return publicApiMatchers.some(({ regexp }) => regexp.test(pathname));
+}
 
 function isPublicAsset(pathname) {
   return (
@@ -97,34 +132,22 @@ function loginRedirectForPath(pathname) {
   return "/login_customer";
 }
 
-async function isBranchClosedNow() {
-  const z = t.now();
-  const y = z.year;
-  const m = String(z.month).padStart(2, "0");
-  const d = String(z.day).padStart(2, "0");
-  const startAt = `${y}-${m}-${d} 00:00:00`;
-  const endAt = `${y}-${m}-${d} 23:59:59`;
-  const [rows] = await pool.execute(
-    `SELECT id
-       FROM closures
-      WHERE scope = 'global'
-        AND status = 'active'
-        AND start_at <= ?
-        AND end_at >= ?
-      LIMIT 1`,
-    [endAt, startAt]
-  );
-  return rows.length > 0;
-}
-
-app.use((req, res, next) => {
+app.use(async (req, res, next) => {
   if (!isProduction) return next();
   const pathname = req.path || "/";
 
+  // Hizli akis aciksa /randevu sayfasi oturumsuz acilir (OTP formun sonunda istenir)
+  if (pathname.replace(/\/+$/, "") === "/randevu" && (await getBookingFlowMode()) === "quick") {
+    return next();
+  }
+
   if (isPublicAsset(pathname)) return next();
 
+  // WhatsApp webhooks bypass auth (Meta sends without JWT)
+  if (pathname.startsWith("/webhooks/")) return next();
+
   if (pathname.startsWith("/api")) {
-    if (publicApi.has(pathname)) return next();
+    if (isPublicApi(pathname)) return next();
     const decoded = readJwt(req);
     if (!decoded) return res.status(401).json({ ok: false, message: "Unauthenticated" });
     if (pathname === "/api/appointments/stream" && decoded.typ !== "user" && decoded.typ !== "barber") {
@@ -140,34 +163,13 @@ app.use((req, res, next) => {
     return res.redirect(302, loginRedirectForPath(pathname));
   }
 
-  if (pathname.startsWith("/bPanel") && decoded.typ !== "user" && decoded.typ !== "barber") {
+  if (pathname.startsWith("/bPanel") && decoded.typ !== "user") {
     return res.redirect(302, "/login_barber");
   }
-  if (pathname.startsWith("/randevu") && decoded.typ !== "customer") {
+  if ((pathname.startsWith("/randevu") || pathname.startsWith("/randevular")) && decoded.typ !== "customer") {
     return res.redirect(302, "/login_customer");
   }
 
-  return next();
-});
-
-// -------- Customer Page Guard (branch closed) --------
-app.use(async (req, res, next) => {
-  const pathname = req.path || "/";
-  if (pathname.startsWith("/api")) return next();
-  if (isPublicAsset(pathname)) return next();
-  const isCustomerPage =
-    pathname.startsWith("/randevu") ||
-    pathname.startsWith("/success") ||
-    pathname === "/login_customer" ||
-    pathname === "/register";
-  if (!isCustomerPage) return next();
-  try {
-    if (await isBranchClosedNow()) {
-      return res.redirect(302, "/");
-    }
-  } catch (err) {
-    console.error("branch closure check failed", err);
-  }
   return next();
 });
 
@@ -224,8 +226,13 @@ app.use((err, req, res, next) => {
     });
 });
 
-// -------- Server --------
+// -------- Settings init --------
+ensureSettingsDefaults().catch(console.error);
+
+// -------- Scheduler --------
 startScheduler();
+
+// -------- Server --------
 const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, () => {
     console.log(`Server running: http://localhost:${PORT}`);

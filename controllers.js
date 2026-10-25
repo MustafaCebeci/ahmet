@@ -2,8 +2,33 @@
 const { Models, pool } = require("./models");
 const t = require("./temporal_api.utils");
 const jwt = require("jsonwebtoken");
-const { sendOtp, verifyOtp, sendSms, sendCancellationSms } = require("./notification.service.js");
-const { emitAppointment } = require("./sse");
+const { sendOtp, verifyOtp, sendCancellationSms } = require("./notification.service.js");
+const { sendNotification } = require("./messageManager");
+const { emitAppointment, emitDesktopEvent } = require("./sse");
+const { getBookingFlowMode, invalidateBookingFlowModeCache, BOOKING_FLOW_MODES } = require("./settingsManager");
+
+// "Beni hatırla" oturum süresi (gün)
+const REMEMBER_DAYS = 90;
+const REMEMBER_MAX_AGE_MS = REMEMBER_DAYS * 24 * 60 * 60 * 1000;
+
+// OTP gönderim sınırları (kullanıcı başına DB, IP başına bellek)
+const OTP_WINDOW_MINUTES = 10;
+const OTP_MAX_PER_USER = 5;
+const OTP_MAX_PER_IP = 10;
+const otpIpHits = new Map(); // ip -> number[] (ms timestamps)
+
+function otpIpAllowed(ip) {
+    const now = Date.now();
+    const windowMs = OTP_WINDOW_MINUTES * 60 * 1000;
+    const hits = (otpIpHits.get(ip) || []).filter((ts) => now - ts < windowMs);
+    if (hits.length >= OTP_MAX_PER_IP) {
+        otpIpHits.set(ip, hits);
+        return false;
+    }
+    hits.push(now);
+    otpIpHits.set(ip, hits);
+    return true;
+}
 
 // --------------- Helpers ---------------
 function httpError(status, message) {
@@ -14,6 +39,17 @@ function httpError(status, message) {
 
 function asyncWrap(fn) {
     return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+/**
+ * Accepts true/false, 0/1, "0"/"1". Returns:
+ *   1 → truthy, 0 → falsy, undefined → key omitted, null → invalid input.
+ */
+function normalizeBool(v) {
+    if (v === undefined || v === null) return undefined;
+    if (v === true || v === 1 || v === "1" || v === "true" || v === "TRUE") return 1;
+    if (v === false || v === 0 || v === "0" || v === "false" || v === "FALSE") return 0;
+    return null;
 }
 
 const DEFAULT_STAFF_IMAGE = "/assets/ni.png";
@@ -213,6 +249,24 @@ async function createConfirmedAppointmentWithSlots({
     return appointmentId;
 }
 
+// OTP gönderiminden önce çağrılır: IP ve kullanıcı başına sınır, aşılırsa 429.
+// otp_codes.created_at doldurulmadığı için expires_at (= oluşturma + ttl) üzerinden sayılır.
+async function assertOtpAllowed(req, userType, userId) {
+    const ip = req.ip || req.socket?.remoteAddress || "unknown";
+    if (!otpIpAllowed(ip)) {
+        throw httpError(429, "Cok fazla deneme. Lutfen daha sonra tekrar deneyin.");
+    }
+    const since = t.toISODateTime(t.now().subtract({ minutes: OTP_WINDOW_MINUTES }));
+    const [rows] = await pool.execute(
+        `SELECT COUNT(*) AS cnt FROM otp_codes
+         WHERE user_type = ? AND user_id = ? AND expires_at > ?`,
+        [userType, userId, since]
+    );
+    if (Number(rows[0]?.cnt ?? 0) >= OTP_MAX_PER_USER) {
+        throw httpError(429, "Cok fazla kod istendi. Lutfen birkac dakika sonra tekrar deneyin.");
+    }
+}
+
 // --------------- JWT helpers ---------------
 function mustJwtSecret() {
     const s = process.env.JWT_SECRET;
@@ -274,16 +328,46 @@ const AuthControllers = {
             );
 
             const customer = rows[0];
-            const customerId = customer?.id;
+            let customerId = customer?.id;
             if (!customerId) {
-                const redirectUrl = `/register?phone=${encodeURIComponent(phone)}`;
-                return res.status(404).json({
-                    ok: false,
-                    message: "Customer not found",
-                    redirect_url: redirectUrl,
-                });
-            }
-            if (Number(customer.is_active) === 0) {
+                // Hizli akis: sadece booking_flow_mode='quick' iken telefon otomatik kaydedilir
+                const canAutoRegister =
+                    body.autoRegister === true && /^5\d{9}$/.test(phone) &&
+                    (await getBookingFlowMode()) === "quick";
+                if (!canAutoRegister) {
+                    const redirectUrl = `/register?phone=${encodeURIComponent(phone)}`;
+                    return res.status(404).json({
+                        ok: false,
+                        message: "Customer not found",
+                        redirect_url: redirectUrl,
+                    });
+                }
+                // Yeni satir olusmadan once IP sinirini uygula (spam kayit engeli)
+                const ip = req.ip || req.socket?.remoteAddress || "unknown";
+                if (!otpIpAllowed(ip)) {
+                    throw httpError(429, "Cok fazla deneme. Lutfen daha sonra tekrar deneyin.");
+                }
+                try {
+                    customerId = await Models.customers.create({
+                        phone,
+                        display_name: null,
+                        nickname: null,
+                        is_active: 1,
+                    });
+                } catch (err) {
+                    // Es zamanli istekte baska bir istek olusturmus olabilir
+                    if (err && (err.code === "ER_DUP_ENTRY" || err.errno === 1062)) {
+                        const [again] = await pool.execute(
+                            `SELECT id FROM customers WHERE phone = ? LIMIT 1`,
+                            [phone]
+                        );
+                        customerId = again[0]?.id;
+                    } else {
+                        throw err;
+                    }
+                }
+                if (!customerId) throw httpError(500, "Musteri olusturulamadi");
+            } else if (Number(customer.is_active) === 0) {
                 throw httpError(403, "Hesap pasif");
             }
             const [flagRows] = await pool.execute(
@@ -296,6 +380,26 @@ const AuthControllers = {
                     message: "Hesabiniz kara listeye alinmistir.",
                 });
             }
+
+            // Hizli akis: limit dolmussa OTP gondermeden uyar (yeni olusturulan musteride 0 randevu vardir)
+            if (body.autoRegister === true && (await getBookingFlowMode()) === "quick") {
+                const settingsJson = await getBusinessSettingsJson();
+                const maxActiveCount = Number(settingsJson.multiple_appointment_count ?? 2);
+                if (Number.isFinite(maxActiveCount) && maxActiveCount > 0) {
+                    const [cntRows] = await pool.execute(
+                        `SELECT COUNT(*) AS cnt FROM appointments WHERE customer_id = ? AND status = 'confirmed'`,
+                        [customerId]
+                    );
+                    if (Number(cntRows[0]?.cnt ?? 0) >= maxActiveCount) {
+                        throw httpError(
+                            400,
+                            "Randevu limitine ulaşılmıştır. Lütfen başka bir numara girin."
+                        );
+                    }
+                }
+            }
+
+            await assertOtpAllowed(req, "customer", customerId);
 
             const resp = await sendOtp({
                 user_type: "customer",
@@ -341,6 +445,7 @@ const AuthControllers = {
             console.log('[DEBUG LOGIN] Account found:', acc.id, '| is_active:', acc.is_active);
             if (acc.is_active === 0) throw httpError(403, "Hesap pasif");
 
+            await assertOtpAllowed(req, "staff_account", acc.id);
             console.log('[DEBUG LOGIN] Calling sendOtp for staff_account:', acc.id, '| phone:', acc.staff_phone);
             const resp = await sendOtp({
                 user_type: "staff_account",
@@ -484,7 +589,10 @@ const AuthControllers = {
         }
 
         const isUser = userType === "user" || userType === "barber";
-        const token = signJwt(payload, { expiresIn: isUser ? "2d" : undefined });
+        const remember = body.remember === true;
+        const token = signJwt(payload, {
+            expiresIn: remember ? `${REMEMBER_DAYS}d` : isUser ? "2d" : undefined,
+        });
 
         console.log('[DEBUG VERIFY] Token oluşturuldu, cookie set ediliyor...');
         console.log('[DEBUG VERIFY] isUser:', isUser, '| maxAge:', isUser ? 2 * 24 * 60 * 60 * 1000 : 'default');
@@ -492,7 +600,9 @@ const AuthControllers = {
         res.cookie(
             "access_token",
             token,
-            cookieOptions({ maxAge: isUser ? 2 * 24 * 60 * 60 * 1000 : undefined })
+            cookieOptions({
+                maxAge: remember ? REMEMBER_MAX_AGE_MS : isUser ? 2 * 24 * 60 * 60 * 1000 : undefined,
+            })
         );
 
         console.log('[DEBUG VERIFY] Cookie set edildi, response dönüyor...');
@@ -572,6 +682,10 @@ const AuthControllers = {
 
             if (!rows.length) {
                 return res.status(404).json({ ok: false, message: "User not found" });
+            }
+            // 90 gunluk oturumlarda pasife alinan hesap hemen dussun
+            if (Number(rows[0].is_active) === 0) {
+                return res.status(403).json({ ok: false, message: "Hesap pasif" });
             }
 
             const businessName = settingsJson.business_name ?? settingsJson.businessName ?? null;
@@ -811,10 +925,10 @@ const BookingControllers = {
         if (startMin < openMin || startMin >= closeMin) {
             throw httpError(400, "Selected time is outside working hours");
         }
-        // 5 dk slot kurali gecici olarak devre disi birakildi
-        // if ((startMin - openMin) % VIRTUAL_SLOT_MINUTES !== 0) {
-        //     throw httpError(400, "Selected time is not aligned with 5-minute slots");
-        // }
+        // 5 dk slot kurali: dakika acilisa gore 5 dk carpani olmali
+        if ((startMin - openMin) % VIRTUAL_SLOT_MINUTES !== 0) {
+            throw httpError(400, "Selected time is not aligned with 5-minute slots");
+        }
 
 
         // service doğrula (duration çekme yok)
@@ -933,36 +1047,59 @@ const BookingControllers = {
             await conn.beginTransaction();
 
             // 1) appointments insert
-            const [r1] = await conn.execute(
-                `
-          INSERT INTO appointments
-            (
-              provider_id, service_id, is_custom, customer_id,
-              start_at, end_at,
-              service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
-              provider_name_snapshot, provider_type_snapshot,
-              customer_note
-            )
-          VALUES
-            (?, ?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
-        `,
-                // end_at expr: DATE_ADD(start_at, durationMin)
-                [
-                    provider.id,
-                    serviceId,
-                    0,
-                    customerId,
-                    startAt,
-                    startAt,
-                    isCustom ? durationMin : svc.duration_minutes,
-                    isCustom ? (body.custom_service_name ?? "Özel Randevu") : svc.name,
-                    isCustom ? durationMin : svc.duration_minutes,
-                    effectivePrice,
-                    provider.name,
-                    provider.provider_type,
-                    customerNote
-                ]
-            );
+            const endAtSqlExpr = `DATE_ADD(?, INTERVAL ? MINUTE)`;
+
+const [r1] = await conn.execute(
+`
+INSERT INTO appointments
+(
+    provider_id,
+    service_id,
+    is_custom,
+    source,
+    customer_id,
+    start_at,
+    end_at,
+    service_name_snapshot,
+    service_duration_minutes_snapshot,
+    service_price_snapshot,
+    provider_name_snapshot,
+    provider_type_snapshot,
+    customer_note
+)
+VALUES
+(
+    ?, ?, ?, 'customer', ?,
+    ?,
+    ${endAtSqlExpr},
+    ?, ?, ?, ?, ?, ?
+)
+`,
+[
+    provider.id,
+    serviceId,
+    isCustom ? 1 : 0,
+    customerId,
+
+    startAt,     // start_at
+
+    startAt,     // DATE_ADD başlangıcı
+    durationMin, // dakika
+
+    isCustom
+        ? (body.custom_service_name ?? "Özel Randevu")
+        : svc.name,
+
+    durationMin,
+
+    effectivePrice,
+
+    provider.name,
+
+    provider.provider_type,
+
+    customerNote
+]);
 
             const appointmentId = r1.insertId;
 
@@ -1018,52 +1155,50 @@ const BookingControllers = {
                 status: "confirmed",
             });
 
-            try {
-                const smsEnabled = settingsJson.sms_reminder !== false;
-                if (smsEnabled && !noPhone) {
-                    let customerPhone = decoded.phone;
-                    if (!customerPhone) {
-                        const [cRows] = await pool.execute(
-                            `SELECT phone FROM customers WHERE id = ? LIMIT 1`,
-                            [customerId]
-                        );
-                        customerPhone = cRows[0]?.phone ?? null;
-                    }
-                    if (customerPhone) {
-                        const msg = `Ahmet Şanlı Hair Salon - Randevunuz olusturuldu. Tarih: ${dateStr} ${timeStr}. Hizmet: ${svc.name}.`;
-                        await sendSms({
-                            appointment_id: appointmentId,
-                            phone: customerPhone,
-                            message: msg,
-                            type: "reminder"
-                        });
-                    }
-                }
-            } catch (smsErr) {
-                console.error("SMS send failed:", smsErr);
+            // Desktop SSE — yeni randevu oluştu
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
+
+            let customerPhone = decoded.phone;
+            if (!customerPhone) {
+                const [cRows] = await pool.execute(
+                    `SELECT phone FROM customers WHERE id = ? LIMIT 1`,
+                    [customerId]
+                );
+                customerPhone = cRows[0]?.phone ?? null;
             }
 
-            // Staff bildirim SMS'i
             try {
-                const staffNotificationEnabled = settingsJson.sms_notification !== false;
-                if (staffNotificationEnabled) {
-                    const [staffRows] = await pool.execute(
-                        `SELECT phone FROM staff WHERE id = ? LIMIT 1`,
-                        [staffId]
-                    );
-                    const staffPhone = staffRows[0]?.phone ?? null;
-                    if (staffPhone) {
-                        const msg = `Ahmet Şanlı Hair Salon - Yeni randevu: ${svc.name}, ${dateStr} ${timeStr}.`;
-                        await sendSms({
-                            appointment_id: appointmentId,
-                            phone: staffPhone,
-                            message: msg,
-                            type: "reminder"
-                        });
-                    }
+                if (!noPhone && customerPhone) {
+                    await sendNotification({
+                        template: 'appointment_created',
+                        phone: customerPhone,
+                        bodyVars: ['Ahmet Şanlı Hair Salon', `${dateStr} ${timeStr}`, svc.name],
+                        appointment_id: appointmentId,
+                        type: 'appointment_created'
+                    });
                 }
-            } catch (staffSmsErr) {
-                console.error("Staff SMS send failed:", staffSmsErr);
+            } catch (err) {
+                console.error("Bildirim gönderilemedi:", err);
+            }
+
+            // Staff bildirim
+            try {
+                const [staffRows] = await pool.execute(
+                    `SELECT phone FROM staff WHERE id = ? LIMIT 1`,
+                    [staffId]
+                );
+                const staffPhone = staffRows[0]?.phone ?? null;
+                if (staffPhone) {
+                    await sendNotification({
+                        template: 'staff_appointment',
+                        phone: staffPhone,
+                        bodyVars: [decoded.display_name || 'Müşteri', customerPhone || decoded.phone, `${dateStr} ${timeStr}`],
+                        appointment_id: appointmentId,
+                        type: 'staff_appointment'
+                    });
+                }
+            } catch (err) {
+                console.error("Staff bildirim gönderilemedi:", err);
             }
 
             const appointmentIdOut = appointmentId ?? "";
@@ -1419,6 +1554,9 @@ const BookingControllers = {
         const endDay = String(endDate.getDate()).padStart(2, '0');
         const endDateTime = `${endYear}-${endMonth}-${endDay} 03:00:00`;
 
+        // DEBUG: panelListV2 tarih aralığı
+        console.log('[PANEL_V2]', { date, startDateTime, endDateTime });
+
         let query = `
             SELECT
                 a.id AS appointment_id,
@@ -1475,6 +1613,13 @@ const BookingControllers = {
             status: row.status,
             servicePrice: row.service_price_snapshot,
         }));
+
+        // DEBUG: dönen randevular
+        console.log('[PANEL_V2_ITEMS]', {
+            date,
+            count: items.length,
+            items: items.map(i => ({ id: i.id, start: i.start, end: i.end, status: i.status }))
+        });
 
         return res.json({ ok: true, items });
     }),
@@ -1700,6 +1845,10 @@ const BookingControllers = {
                 start_at: ap.start_at,
                 status,
             });
+
+            // Desktop SSE — randevu güncellendi (yeniden yazdır)
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: ap.start_at });
+
             return res.json({ ok: true, status });
         } catch (err) {
             await conn.rollback();
@@ -1862,7 +2011,7 @@ const BookingControllers = {
 
             await conn.commit();
 
-            // Müşteriye SMS ile bilgi ver
+            // Müşteriye bildirim
             const timeChanged = String(ap.start_at) !== startAt;
             if (timeChanged) {
                 try {
@@ -1874,11 +2023,16 @@ const BookingControllers = {
                     if (customer?.phone) {
                         const oldTime = t.formatDateTime(ap.start_at);
                         const newTime = t.formatDateTime(startAt);
-                        const msg = `Ahmet Şanlı Hair Salon - Randevunuz ${oldTime} yerine ${newTime} saatine taşınmıştır. Saygılarımızla.`;
-                        await sendSms({ phone: customer.phone, message: msg, type: "general" });
+                        await sendNotification({
+                            template: 'appointment_update',
+                            phone: customer.phone,
+                            headerVars: ['Ahmet Şanlı Hair Salon'],
+                            bodyVars: ['Ahmet Şanlı Hair Salon', oldTime, newTime],
+                            type: 'appointment_update'
+                        });
                     }
-                } catch (smsErr) {
-                    console.error("SMS gönderim hatası:", smsErr);
+                } catch (err) {
+                    console.error("Bildirim gönderilemedi:", err);
                 }
             }
 
@@ -1889,6 +2043,7 @@ const BookingControllers = {
                 start_at: startAt,
                 status: ap.status,
             });
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
 
             return res.json({ ok: true });
         } catch (err) {
@@ -2137,6 +2292,247 @@ const BookingControllers = {
     }),
 
     /**
+     * POST /api/appointments/monthly-occupancy
+     * Body: { year, month }
+     * Ayın her günü için doluluk bilgisi döndürür (HH:MM formatı için dakika bazlı).
+     */
+    monthlyOccupancy: asyncWrap(async (req, res) => {
+        const body = req.body || {};
+        const year = Number(body.year);
+        const month = Number(body.month);
+        if (!year || !month || month < 1 || month > 12) {
+            throw httpError(400, "year ve month zorunlu");
+        }
+
+        const lastDay = t.lastDayOfMonth(year, month);
+        const mm = String(month).padStart(2, "0");
+        const startAt = `${year}-${mm}-01 00:00:00`;
+        const endAt = `${year}-${mm}-${String(lastDay).padStart(2, "0")} 23:59:59`;
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[MONTHLY-OCCUPANCY] İstek alındı: year=${year}, month=${month}`);
+            console.log(`[MONTHLY-OCCUPANCY] Tarih aralığı: ${startAt} → ${endAt}`);
+        }
+
+        // Çalışma saatleri ve kapalı günler settings'den
+        const settings = await getBusinessSettingsJson();
+        const startHour = String(settings.start_hour ?? "09:00");
+        const endHour = String(settings.end_hour ?? "22:00");
+        const closedDays = Array.isArray(settings.closed_days) ? settings.closed_days : [];
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[MONTHLY-OCCUPANCY] Settings: start_hour=${startHour}, end_hour=${endHour}, closed_days=${JSON.stringify(closedDays)}`);
+        }
+
+        // start_hour/end_hour -> dakika cinsinden günlük toplam
+        const [sH, sM] = startHour.split(":").map(Number);
+        const [eH, eM] = endHour.split(":").map(Number);
+        const totalMinutesPerDay = (eH * 60 + eM) - (sH * 60 + sM);
+
+        // SQL: start_at/end_at VARCHAR(80) olduğu için aggregation JS tarafında yapılacak
+        // confirmed + completed + no_show randevuları çek (cancelled hariç)
+        // Aralık karşılaştırması SUBSTRING ile (string karşılaştırmasında .000 vs boşluk sorun çıkarıyor)
+        const [rows] = await pool.execute(
+            `SELECT SUBSTRING(start_at, 1, 10) AS day,
+                    start_at,
+                    end_at,
+                    status
+             FROM appointments
+             WHERE SUBSTRING(start_at, 1, 10) >= ?
+               AND SUBSTRING(start_at, 1, 10) <= ?
+               AND status IN ('confirmed', 'completed', 'no_show')`,
+            [`${year}-${mm}-01`, `${year}-${mm}-${String(lastDay).padStart(2, "0")}`]
+        );
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[MONTHLY-OCCUPANCY] SQL'den gelen randevu sayısı: ${rows.length}`);
+            if (rows.length > 0) {
+                console.log(`[MONTHLY-OCCUPANCY] İlk 3 örnek:`, rows.slice(0, 3));
+            } else {
+                console.log(`[MONTHLY-OCCUPANCY] UYARI: Hiç randevu dönmedi! Aralığı kontrol et: ${startAt} → ${endAt}`);
+            }
+        }
+
+        // rows -> map[YYYY-MM-DD] = { filled_minutes, appointments_count }
+        const dayMap = {};
+        let parseErrors = 0;
+        for (const row of rows) {
+            const dayStr = String(row.day).slice(0, 10);
+
+            // Temporal API ile dakika farkı hesapla
+            const startDt = t.fromDBDateTime(row.start_at);
+            const endDt = t.fromDBDateTime(row.end_at);
+            let minutes = 0;
+            if (startDt && endDt) {
+                minutes = t.diffMinutes(startDt, endDt);
+            } else {
+                parseErrors += 1;
+                if (process.env.NODE_ENV !== "production") {
+                    console.warn(`[MONTHLY-OCCUPANCY] Parse hatası: start_at=${row.start_at}, end_at=${row.end_at}`);
+                }
+            }
+
+            if (!dayMap[dayStr]) {
+                dayMap[dayStr] = { filled_minutes: 0, appointments_count: 0 };
+            }
+            dayMap[dayStr].filled_minutes += minutes;
+            dayMap[dayStr].appointments_count += 1;
+        }
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[MONTHLY-OCCUPANCY] dayMap oluşturuldu: ${Object.keys(dayMap).length} gün, parse hataları: ${parseErrors}`);
+            console.log(`[MONTHLY-OCCUPANCY] dayMap içeriği:`, dayMap);
+        }
+
+        // Tüm günleri üret (kapalı günler dahil)
+        const days = [];
+        let workingDays = 0;
+        let totalFilledMinutes = 0;
+
+        for (let d = 1; d <= lastDay; d++) {
+            const dateStr = `${year}-${mm}-${String(d).padStart(2, "0")}`;
+            const dateObj = new Date(year, month - 1, d);
+            const dayOfWeek = dateObj.getDay(); // 0 = Pazar
+            const isClosed = closedDays.includes(dayOfWeek);
+
+            const dayData = dayMap[dateStr] || { filled_minutes: 0, appointments_count: 0 };
+
+            days.push({
+                date: dateStr,
+                day: d,
+                day_of_week: dayOfWeek,
+                is_closed: isClosed,
+                filled_minutes: dayData.filled_minutes,
+                appointments_count: dayData.appointments_count,
+                total_minutes: isClosed ? 0 : totalMinutesPerDay
+            });
+
+            if (!isClosed) {
+                workingDays += 1;
+                totalFilledMinutes += dayData.filled_minutes;
+            }
+        }
+
+        const totalPossibleMinutes = workingDays * totalMinutesPerDay;
+        const occupancyPercent = totalPossibleMinutes > 0
+            ? (totalFilledMinutes / totalPossibleMinutes) * 100
+            : 0;
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[MONTHLY-OCCUPANCY] Summary: working_days=${workingDays}, total_filled=${totalFilledMinutes}dk (${Math.floor(totalFilledMinutes/60)}:${String(totalFilledMinutes%60).padStart(2,'0')}), total_possible=${totalPossibleMinutes}dk, occupancy=${occupancyPercent.toFixed(1)}%`);
+            console.log(`[MONTHLY-OCCUPANCY] İlk 5 gün:`, days.slice(0, 5).map(d => ({ date: d.date, filled: d.filled_minutes, count: d.appointments_count })));
+        }
+
+        return res.json({
+            ok: true,
+            year,
+            month,
+            start_hour: startHour,
+            end_hour: endHour,
+            closed_days: closedDays,
+            total_minutes_per_day: totalMinutesPerDay,
+            days,
+            summary: {
+                working_days: workingDays,
+                total_filled_minutes: totalFilledMinutes,
+                total_possible_minutes: totalPossibleMinutes,
+                occupancy_percent: Math.round(occupancyPercent * 10) / 10
+            }
+        });
+    }),
+
+    /**
+     * POST /api/appointments/day-details
+     * Body: { date: "YYYY-MM-DD" }
+     * Belirli bir günün tüm randevularını getirir (confirmed/completed/no_show)
+     * Customer bilgisi JOIN ile birlikte döner
+     */
+    dayDetails: asyncWrap(async (req, res) => {
+        const body = req.body || {};
+        const date = String(body.date || "").trim();
+
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            throw httpError(400, "Geçerli bir tarih giriniz (YYYY-MM-DD)");
+        }
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[DAY-DETAILS] İstek: date=${date}`);
+        }
+
+        // SQL: o güne ait randevuları customer bilgisi ile birlikte çek
+        const [rows] = await pool.execute(
+            `SELECT
+                a.id,
+                a.start_at,
+                a.end_at,
+                a.status,
+                a.service_name_snapshot,
+                a.service_duration_minutes_snapshot,
+                a.service_price_snapshot,
+                a.provider_name_snapshot,
+                a.provider_type_snapshot,
+                a.provider_id,
+                a.customer_id,
+                a.customer_note,
+                a.staff_note,
+                a.is_custom,
+                c.display_name AS customer_name,
+                c.phone AS customer_phone
+             FROM appointments a
+             LEFT JOIN customers c ON c.id = a.customer_id
+             WHERE SUBSTRING(a.start_at, 1, 10) = ?
+               AND a.status IN ('confirmed', 'completed', 'no_show')
+             ORDER BY a.start_at ASC, a.id ASC`,
+            [date]
+        );
+
+        const appointments = rows.map((row) => {
+            // Dakika hesabı Temporal API ile
+            const startDt = t.fromDBDateTime(row.start_at);
+            const endDt = t.fromDBDateTime(row.end_at);
+            let durationMinutes = 0;
+            if (startDt && endDt) {
+                durationMinutes = t.diffMinutes(startDt, endDt);
+            }
+
+            // Saat başlangıcı (YYYY-MM-DD HH:MM)
+            const timeStr = String(row.start_at).slice(11, 16);
+
+            return {
+                id: row.id,
+                start_at: row.start_at,
+                end_at: row.end_at,
+                start_time: timeStr,
+                duration_minutes: durationMinutes,
+                status: row.status,
+                service_name: row.service_name_snapshot,
+                service_duration: row.service_duration_minutes_snapshot,
+                service_price: row.service_price_snapshot,
+                provider_name: row.provider_name_snapshot,
+                provider_type: row.provider_type_snapshot,
+                provider_id: row.provider_id,
+                customer_id: row.customer_id,
+                customer_name: row.customer_name || `Müşteri #${row.customer_id}`,
+                customer_phone: row.customer_phone || null,
+                customer_note: row.customer_note,
+                staff_note: row.staff_note,
+                is_custom: row.is_custom === 1
+            };
+        });
+
+        if (process.env.NODE_ENV !== "production") {
+            console.log(`[DAY-DETAILS] ${appointments.length} randevu bulundu`);
+        }
+
+        return res.json({
+            ok: true,
+            date,
+            appointments,
+            count: appointments.length
+        });
+    }),
+
+    /**
      * POST /api/appointments/panel/create
      * body: { serviceId, date, time, phone, display_name?, customer_note?, staffId? }
      */
@@ -2296,14 +2692,14 @@ const BookingControllers = {
                 `
            INSERT INTO appointments
              (
-              provider_id, service_id, is_custom, customer_id,
+              provider_id, service_id, is_custom, source, customer_id,
               start_at, end_at,
               service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
               provider_name_snapshot, provider_type_snapshot,
               customer_note
             )
           VALUES
-            (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, 'barber', ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 [
                     provider.id,
@@ -2365,6 +2761,7 @@ const BookingControllers = {
                 start_at: startAt,
                 status: "confirmed",
             });
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
             return res.status(201).json({ ok: true, appointmentId });
         } catch (err) {
             await conn.rollback();
@@ -2412,10 +2809,9 @@ const BookingControllers = {
         if (!startAt) throw httpError(400, "Gecersiz date/time");
         const startMin = parseHHMMToMinutes(timeStr);
         if (startMin === null) throw httpError(400, "Invalid time format");
-        // 5 dk slot kurali gecici olarak devre disi birakildi
-        // if (startMin % VIRTUAL_SLOT_MINUTES !== 0) {
-        //     throw httpError(400, "Selected time is not aligned with 5-minute slots");
-        // }
+        if (startMin % VIRTUAL_SLOT_MINUTES !== 0) {
+            throw httpError(400, "Selected time is not aligned with 5-minute slots");
+        }
 
         let staffId = Number(staffIdFromToken);
         if (requestedStaffId && requestedStaffId !== staffId) {
@@ -2505,14 +2901,14 @@ const BookingControllers = {
                 `
            INSERT INTO appointments
              (
-              provider_id, service_id, is_custom, customer_id,
+              provider_id, service_id, is_custom, source, customer_id,
               start_at, end_at,
               service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
               provider_name_snapshot, provider_type_snapshot,
               customer_note
             )
           VALUES
-            (?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, 'barber', ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 [
                     provider.id,
@@ -2574,6 +2970,7 @@ const BookingControllers = {
                 start_at: startAt,
                 status: "confirmed",
             });
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
             return res.status(201).json({ ok: true, appointmentId });
         } catch (err) {
             await conn.rollback();
@@ -2618,10 +3015,9 @@ const BookingControllers = {
 
         const startMin = parseHHMMToMinutes(timeStr);
         if (startMin === null) throw httpError(400, "Invalid time format");
-        // 5 dk slot kurali gecici olarak devre disi birakildi
-        // if (startMin % VIRTUAL_SLOT_MINUTES !== 0) {
-        //     throw httpError(400, "Selected time is not aligned with 5-minute slots");
-        // }
+        if (startMin % VIRTUAL_SLOT_MINUTES !== 0) {
+            throw httpError(400, "Selected time is not aligned with 5-minute slots");
+        }
 
         // Provider dogrula
         const [pRows] = await pool.execute(
@@ -2691,14 +3087,14 @@ const BookingControllers = {
                 `
           INSERT INTO appointments
             (
-              provider_id, service_id, is_custom, customer_id,
+              provider_id, service_id, is_custom, source, customer_id,
               start_at, end_at,
               service_name_snapshot, service_duration_minutes_snapshot, service_price_snapshot,
               provider_name_snapshot, provider_type_snapshot,
               customer_note
             )
           VALUES
-            (?, ?, ?, ?, ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, 'barber', ?, ${endAtSqlExpr}, ?, ?, ?, ?, ?, ?)
         `,
                 [
                     provider.id,
@@ -2761,6 +3157,8 @@ const BookingControllers = {
                 status: "confirmed",
             });
 
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
+
             return res.status(201).json({ ok: true, appointmentId });
         } catch (err) {
             await conn.rollback();
@@ -2800,14 +3198,33 @@ const BookingControllers = {
         if (!endTimeStr) throw httpError(400, "end_time zorunlu");
 
         // Parse times
-        const startAt = toSqlDateTime(dateStr, timeStr);
-        const endAt = toSqlDateTime(dateStr, endTimeStr);
+        // Gece yarısı geçişleri için start_date/end_date ayrı alınabilir (frontend'den)
+        const startDateStr = String(body.start_date || dateStr).trim();
+        const endDateStr = String(body.end_date || startDateStr).trim();
+
+        const startAt = toSqlDateTime(startDateStr, timeStr);
+        const endAt = toSqlDateTime(endDateStr, endTimeStr);
         if (!startAt || !endAt) throw httpError(400, "Gecersiz date/time");
 
+        // Dakika karşılaştırması artık aynı gün üzerinden değil, tarih bazlı yapılmalı
         const startMin = parseHHMMToMinutes(timeStr);
         const endMin = parseHHMMToMinutes(endTimeStr);
         if (startMin === null || endMin === null) throw httpError(400, "Invalid time format");
-        if (endMin <= startMin) throw httpError(400, "Bitis zamani baslangictan once olmali");
+
+        // Tarihleri gerçek datetime'a çevirip karşılaştır (gece yarısı geçişleri için)
+        const startDt = new Date(`${startDateStr} ${timeStr}:00`);
+        const endDt = new Date(`${endDateStr} ${endTimeStr}:00`);
+        if (isNaN(startDt.getTime()) || isNaN(endDt.getTime())) {
+            throw httpError(400, "Invalid date/time");
+        }
+        if (endDt <= startDt) throw httpError(400, "Bitis zamani baslangictan once olmali");
+
+        // DEBUG: createCustom input
+        console.log('[CREATE_CUSTOM]', {
+            dateStr, startDateStr, endDateStr, timeStr, endTimeStr,
+            startAt, endAt,
+            startMin, endMin
+        });
 
         // Validate provider
         const [pRows] = await pool.execute(
@@ -2974,6 +3391,8 @@ const BookingControllers = {
                 start_at: startAt,
                 status: "confirmed",
             });
+
+            emitDesktopEvent("command", "print.appointment", { appointmentId, date: startAt });
 
             return res.status(201).json({ ok: true, appointmentId });
         } catch (err) {
@@ -3465,8 +3884,7 @@ const BookingControllers = {
      * V2 Slot Generator - Uses generateSlotsV2Engine for pure algorithm
      */
     generateSlotsV2: asyncWrap(async (req, res) => {
-        const decoded = readJwtFromReq(req);
-        if (!decoded) throw httpError(401, "Unauthenticated");
+        // Public: hizli akis (oturumsuz) musaitlik gorebilmeli. Yanitta musteri verisi yok.
 
         // Import engine at runtime to avoid circular deps
         const { generateSlotsV2Engine } = require("./src/services/slot-generator-v2");
@@ -3555,29 +3973,68 @@ const BookingControllers = {
             });
         }
 
-        // ====== Get Closures ======
-        const closures = [];
-        let closureQuery = `
-            SELECT start_at, end_at, scope FROM closures
+        // ====== Get Closures (2 aşamalı kontrol + JS date intersection) ======
+        // SQL DATE() comparison kaldırıldı — VARCHAR(60) üzerinde MySQL DATE() coercion güvenilir değil.
+        // Tüm active closure'ları çekip JavaScript'te explicit Date parsing ile kesişim kontrolü yapıyoruz.
+
+        // AŞAMA 1: Global closure'lar (provider_id IS NULL) — her zaman
+        const [globalClosureRows] = await pool.execute(`
+            SELECT start_at, end_at, scope, is_all_day FROM closures
             WHERE status = 'active'
-              AND DATE(start_at) <= ?
-              AND DATE(end_at) >= ?
-              AND (
-                (scope = 'global' AND provider_id IS NULL)
-                OR (scope = 'provider' AND provider_id = ?)
-              )
-        `;
-        let closureParams = [targetDate, targetDate];
-        if (providerId) closureParams.push(providerId);
-        const [closureRows] = await pool.execute(closureQuery, closureParams);
-        for (const closure of closureRows) {
-            const startDt = t.fromDBDateTime(closure.start_at);
-            const endDt = t.fromDBDateTime(closure.end_at);
-            closures.push({
-                start: `${String(startDt.hour).padStart(2,'0')}:${String(startDt.minute).padStart(2,'0')}`,
-                end: `${String(endDt.hour).padStart(2,'0')}:${String(endDt.minute).padStart(2,'0')}`,
-                scope: closure.scope
-            });
+              AND scope = 'global'
+              AND provider_id IS NULL
+        `);
+
+        // AŞAMA 2: Provider'a özel closure'lar — sadece providerId varsa
+        let providerClosureRows = [];
+        if (providerId) {
+            [providerClosureRows] = await pool.execute(`
+                SELECT start_at, end_at, scope, is_all_day FROM closures
+                WHERE status = 'active'
+                  AND scope = 'provider'
+                  AND provider_id = ?
+            `, [providerId]);
+        }
+
+        const closureRows = [...globalClosureRows, ...providerClosureRows];
+
+        // JavaScript date intersection — targetDate ile kesişen closure'ları filtrele
+        // Closure datetime string'leri V8'de LOCAL timezone parse edilir ('YYYY-MM-DD HH:MM:SS')
+        // Target date window da LOCAL midnight/end ile karşılaştırılmalı
+        const targetDateStart = new Date(targetDate + 'T00:00:00');
+        const targetDateEnd   = new Date(targetDate + 'T23:59:59.999');
+
+        const closures = [];
+        const filteredClosures = closureRows.filter(row => {
+            const cStart = new Date(row.start_at).getTime();
+            const cEnd   = new Date(row.end_at).getTime();
+            const tStart = targetDateStart.getTime();
+            const tEnd   = targetDateEnd.getTime();
+            // Kesişim: aStart < bEnd && bStart < aEnd
+            return cStart < tEnd && tStart < cEnd;
+        });
+
+        for (const closure of filteredClosures) {
+            const closureStartDate = String(closure.start_at).split(' ')[0];
+            const closureEndDate = String(closure.end_at).split(' ')[0];
+
+            if (closure.is_all_day == 1) {
+                closures.push({
+                    start: closureStartDate + 'T00:00',
+                    end: closureEndDate + 'T23:59',
+                    scope: closure.scope,
+                    is_all_day: 1
+                });
+            } else {
+                const startDt = t.fromDBDateTime(closure.start_at);
+                const endDt = t.fromDBDateTime(closure.end_at);
+                closures.push({
+                    start: `${String(startDt.hour).padStart(2,'0')}:${String(startDt.minute).padStart(2,'0')}`,
+                    end: `${String(endDt.hour).padStart(2,'0')}:${String(endDt.minute).padStart(2,'0')}`,
+                    scope: closure.scope,
+                    is_all_day: 0
+                });
+            }
         }
 
         // ====== Get Break Rules ======
@@ -3615,6 +4072,40 @@ const BookingControllers = {
             }
         }
 
+        // ====== Get Reserved Slots ======
+        const { expandReservedSlots } = require('./src/services/reserved-slot-expander');
+        let expandedReservedSlots = [];
+        if (providerId) {
+            const [rsRows] = await pool.execute(
+                `SELECT provider_id, day_of_week, start_time, end_time,
+                        recurrence_weeks, beginning, is_active, note
+                 FROM reserved_slots
+                 WHERE provider_id = ? AND is_active = 1`,
+                [providerId]
+            );
+            expandedReservedSlots = expandReservedSlots({
+                date: targetDate,
+                reservedSlots: rsRows,
+                providerId
+            });
+        }
+
+        // ====== Reserved Slot Preview Mode ======
+        // Preview a proposed reserved slot (ghost slot shown as "reserved" status)
+        const previewSlot = body.reserved_slot_preview;
+        if (previewSlot && providerId) {
+            const previewStart = previewSlot.start_time || previewSlot.start;
+            const previewEnd = previewSlot.end_time || previewSlot.end;
+            if (previewStart && previewEnd) {
+                expandedReservedSlots.push({
+                    start: String(previewStart).slice(0, 5),
+                    end: String(previewEnd).slice(0, 5),
+                    source: 'preview',
+                    note: previewSlot.note || 'Önizleme'
+                });
+            }
+        }
+
         // ====== Today Filter ======
         const nowZ = t.now();
         const isToday = targetDate === nowZ.toPlainDate().toString();
@@ -3629,6 +4120,7 @@ const BookingControllers = {
             closures,
             breakRules,
             staticSlots,
+            reservedSlots: expandedReservedSlots,
             isToday,
             currentMinute,
             settings: { slotTime }
@@ -3638,18 +4130,34 @@ const BookingControllers = {
         // Import at runtime to avoid circular deps
         const { generateBookableSlots } = require("./src/services/booking-candidate-generator.js");
 
-        const bookableSlots = generateBookableSlots({
-            timeline: engineResult.slots,
-            serviceDuration: duration,
-            workingHours: { start: startHour, end: endHour },
-            staticSlots: staticSlots
-        });
+        // Eğer gün bitti (dayAlreadyOver) veya tüm gün kapalı (dayFullyClosed),
+        // candidate generator'ı ATLA — boş timeline'da default olarak tüm günü
+        // available yapıyor, bu da bug fix sinyallerini override ederdi.
+        let bookableSlots;
+        if (engineResult.dayAlreadyOver) {
+            bookableSlots = [];
+        } else if (engineResult.dayFullyClosed) {
+            bookableSlots = engineResult.slots;
+        } else {
+            bookableSlots = generateBookableSlots({
+                timeline: engineResult.slots,
+                serviceDuration: duration,
+                workingHours: { start: startHour, end: endHour },
+                staticSlots: staticSlots,
+                currentMinute: isToday ? currentMinute : null
+            });
+        }
 
         return res.json({
             ok: true,
             date: targetDate,
             slots: bookableSlots,
-            settings: engineResult.settings
+            settings: engineResult.settings,
+            meta: {
+                dayAlreadyOver: engineResult.dayAlreadyOver,
+                dayFullyClosed: engineResult.dayFullyClosed,
+                isToday,
+            }
         });
     }),
 
@@ -3779,6 +4287,10 @@ const BookingControllers = {
                     start_at: ap.start_at,
                     status,
                 });
+                emitDesktopEvent("command", "print.appointment", { appointmentId, date: ap.start_at });
+                if (status === "cancelled") {
+                    emitDesktopEvent("state", "appointment.cancelled", { appointmentId });
+                }
             }
             return res.json({ ok: true });
         } finally {
@@ -4180,6 +4692,7 @@ const ScopedControllers = {
         const note = body.note ?? null;
         const cancelAppointments = body.cancel_appointments === true;
         const sendSms = body.send_sms === true;
+        const settingsJson = await getBusinessSettingsJson(businessId);
 
         if (!startAt || !endAt) {
             throw httpError(400, "start_at ve end_at zorunlu");
@@ -4271,7 +4784,7 @@ const ScopedControllers = {
                     );
 
                     // SMS bildirimi gönder
-                    if (sendSms && aptRows.length) {
+                    if (settingsJson.sms_appointment_cancel === true && sendSms && aptRows.length) {
                         for (const appt of aptRows) {
                             await sendCancellationSms(appt, startAt, endAt);
                         }
@@ -4415,12 +4928,38 @@ const ScopedControllers = {
             }
         }
 
+        if (
+            settingsObj?.booking_flow_mode !== undefined &&
+            !BOOKING_FLOW_MODES.includes(settingsObj.booking_flow_mode)
+        ) {
+            throw httpError(400, "booking_flow_mode 'detailed' veya 'quick' olmali");
+        }
+
         await pool.execute(
             `INSERT INTO app_settings (id, settings_json)
              VALUES (1, ?)
              ON DUPLICATE KEY UPDATE settings_json = VALUES(settings_json), updated_at = ?`,
             [JSON.stringify(settingsObj || {}), t.toISODateTime(t.now())]
         );
+
+        invalidateBookingFlowModeCache();
+
+        // Desktop SSE — settings değiştiyse bildir
+        emitDesktopEvent("state", "settings.updated", {
+            printer_enabled: !!settingsObj.printer_enabled,
+            printer_auto_print_new: !!settingsObj.printer_auto_print_new,
+            printer_daily_report: !!settingsObj.printer_daily_report
+        });
+
+        // printer_enabled değişikliği ayrı bir event olarak
+        if (typeof settingsObj.printer_enabled === "boolean") {
+            emitDesktopEvent(
+                "state",
+                settingsObj.printer_enabled ? "printer.enabled" : "printer.disabled",
+                {}
+            );
+        }
+
         return res.json({ ok: true });
     }),
 
@@ -4439,12 +4978,47 @@ const ScopedControllers = {
             throw httpError(400, "duration_minutes zorunlu");
         }
 
-        const id = await Models.services.create({
+        let isDefault = normalizeBool(body.is_default);
+        if (isDefault === null) throw httpError(400, "is_default invalid (0/1/true/false)");
+        if (isDefault === undefined) isDefault = 0;
+
+        const insertPayload = {
             name,
             duration_minutes: durationMinutes,
             price: priceValue,
-            is_active: isActive ? 1 : 0
-        });
+            is_active: isActive ? 1 : 0,
+            is_default: isDefault,
+        };
+
+        // Tek-varsayılan kuralı: is_default = 1 set ediliyorsa
+        // diğer satırları transaction içinde 0'a çekip bu satırı ekle.
+        if (isDefault === 1) {
+            const conn = await pool.getConnection();
+            try {
+                await conn.beginTransaction();
+                await conn.execute(`UPDATE services SET is_default = 0 WHERE is_default = 1`);
+                const [result] = await conn.execute(
+                    `INSERT INTO services (name, duration_minutes, price, is_active, is_default)
+                     VALUES (?, ?, ?, ?, ?)`,
+                    [
+                        insertPayload.name,
+                        insertPayload.duration_minutes,
+                        insertPayload.price,
+                        insertPayload.is_active,
+                        insertPayload.is_default,
+                    ]
+                );
+                await conn.commit();
+                return res.status(201).json({ ok: true, id: result.insertId ?? null });
+            } catch (err) {
+                try { await conn.rollback(); } catch (_) { /* ignore */ }
+                throw err;
+            } finally {
+                try { conn.release(); } catch (_) { /* ignore */ }
+            }
+        }
+
+        const id = await Models.services.create(insertPayload);
         return res.status(201).json({ ok: true, id });
     }),
 
@@ -4475,6 +5049,61 @@ const ScopedControllers = {
             payload.price = body.price;
         }
         if (body.is_active !== undefined) payload.is_active = body.is_active ? 1 : 0;
+        if (body.sound_id !== undefined) payload.sound_id = body.sound_id;
+
+        // is_default body'sinde varsa normalize et; payload'a ekle ve
+        // tek-varsayılan kuralını kontrol et.
+        let wantsDefault = false;
+        if (body.is_default !== undefined) {
+            const normalized = normalizeBool(body.is_default);
+            if (normalized === null) {
+                throw httpError(400, "is_default invalid (0/1/true/false)");
+            }
+            wantsDefault = true;
+            payload.is_default = normalized;
+
+            // is_default = 0 set ediliyorsa ve bu satır tek default ise reddet.
+            if (normalized === 0) {
+                const [defaultRows] = await pool.execute(
+                    `SELECT id FROM services WHERE is_default = 1`
+                );
+                const onlyThisIsDefault =
+                    defaultRows.length === 1 &&
+                    Number(defaultRows[0].id) === Number(id);
+                if (onlyThisIsDefault) {
+                    throw httpError(400, "önce başka bir servisi varsayılan yapın");
+                }
+            }
+        }
+
+        // is_default değişiyorsa transaction içinde uygula ki singleton
+        // kuralı bozulmasın.
+        if (wantsDefault) {
+            const conn = await pool.getConnection();
+            try {
+                await conn.beginTransaction();
+                if (payload.is_default === 1) {
+                    await conn.execute(
+                        `UPDATE services SET is_default = 0 WHERE is_default = 1 AND id <> ?`,
+                        [id]
+                    );
+                }
+                const setParts = Object.keys(payload).map((k) => `${k} = ?`);
+                const setSql = setParts.join(", ");
+                const params = Object.values(payload);
+                await conn.execute(
+                    `UPDATE services SET ${setSql} WHERE id = ?`,
+                    [...params, id]
+                );
+                await conn.commit();
+                return res.json({ ok: true });
+            } catch (err) {
+                try { await conn.rollback(); } catch (_) { /* ignore */ }
+                throw err;
+            } finally {
+                try { conn.release(); } catch (_) { /* ignore */ }
+            }
+        }
 
         const ok = await Models.services.update({ id }, payload);
         if (!ok) return res.status(404).json({ ok: false, message: "Not found" });
@@ -4823,6 +5452,7 @@ const ScopedControllers = {
         const decoded = requireUser(req);
         const businessId = getPersonalBusinessId();
         await requireAdminUser(decoded);
+        const settingsJson = await getBusinessSettingsJson(businessId);
 
         const appointmentId = Number(req.params.id);
         if (!appointmentId) throw httpError(400, "appointment id zorunlu");
@@ -4862,17 +5492,22 @@ const ScopedControllers = {
         const msg = `Ahmet Şanlı Hair Salon - Merhaba ${appt.customer_name || "Musteri"}, randevunuz ${dateStr} tarihinde ${timeStr} saatinde ${appt.service_name || "hizmet"} icin hatirlatilir. Sagliklar!`;
 
         try {
-            await sendSms({
-                appointment_id: appointmentId,
+            const result = await sendNotification({
+                template: 'appointment_reminder',
                 phone: phone,
-                message: msg,
-                type: "reminder",
-                source: "manual"
+                headerVars: ['Ahmet Şanlı Hair Salon'],
+                bodyVars: ['Ahmet Şanlı Hair Salon', `${dateStr} ${timeStr}`],
+                appointment_id: appointmentId,
+                type: 'appointment_reminder',
+                source: 'manual'
             });
-            return res.json({ ok: true, message: "SMS gonderildi" });
-        } catch (smsErr) {
-            console.error("Hatirlatma SMS gonderilemedi:", smsErr);
-            throw httpError(500, "SMS gonderilemedi");
+            if (result.skipped) {
+                return res.json({ ok: true, message: "Bildirim ayarı kapalı" });
+            }
+            return res.json({ ok: true, message: "Bildirim gönderildi" });
+        } catch (err) {
+            console.error("Hatirlatma gönderilemedi:", err);
+            throw httpError(500, "Bildirim gönderilemedi");
         }
     }),
 
@@ -5031,6 +5666,8 @@ const ScopedControllers = {
     periodSettingsDelete: asyncWrap(async (req, res) => {
         const decoded = requireUser(req);
         await requireAdminUser(decoded);
+        const businessId = getPersonalBusinessId();
+        const settingsJson = await getBusinessSettingsJson(businessId);
 
         const id = Number(req.params.id);
         if (!id) throw httpError(400, "id zorunlu");
@@ -5083,7 +5720,7 @@ const ScopedControllers = {
             );
 
             // SMS gönder
-            if (sendSmsFlag && cancelAppts.length) {
+            if (settingsJson.sms_appointment_cancel === true && sendSmsFlag && cancelAppts.length) {
                 for (const appt of cancelAppts) {
                     await sendCancellationSms(appt, psRows[0].start_date, psRows[0].end_date);
                 }
@@ -5099,8 +5736,7 @@ const ScopedControllers = {
     }),
 
     periodSettingsForDate: asyncWrap(async (req, res) => {
-        const decoded = requireSession(req);
-        if (!decoded) throw httpError(401, "Unauthenticated");
+        // Public read: musteri formu donem fiyatlarini oturumsuz da gostermeli
         const body = req.body || {};
         const dateStr = String(body.date || "").trim();
         if (!dateStr) throw httpError(400, "date zorunlu (YYYY-MM-DD)");
@@ -5281,6 +5917,417 @@ const ScopedControllers = {
         const item = await Models.provider_static_slots.get({ id });
         if (!item) return res.status(404).json({ ok: false, message: "Not found" });
         return res.json({ ok: true, item });
+    }),
+
+    /**
+     * reserved_slots CRUD
+     */
+    reservedSlotsList: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const [rows] = await pool.execute(
+            `SELECT rs.*, sp.name AS provider_name, c.display_name AS customer_name
+             FROM reserved_slots rs
+             LEFT JOIN service_providers sp ON sp.id = rs.provider_id
+             LEFT JOIN customers c ON c.id = rs.customer_id
+             ORDER BY rs.day_of_week, rs.start_time`
+        );
+        return res.json({ ok: true, items: rows });
+    }),
+
+    reservedSlotsCreate: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const body = req.body || {};
+        const { provider_id, customer_id, day_of_week, start_time, end_time,
+                recurrence_weeks, beginning, is_active, note } = body;
+        if (!provider_id) throw httpError(400, "provider_id zorunlu");
+        if (!day_of_week) throw httpError(400, "day_of_week zorunlu");
+        if (!start_time) throw httpError(400, "start_time zorunlu");
+        if (!end_time) throw httpError(400, "end_time zorunlu");
+        const [result] = await pool.execute(
+            `INSERT INTO reserved_slots
+             (provider_id, customer_id, day_of_week, start_time, end_time,
+              recurrence_weeks, beginning, is_active, note, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+            [
+                Number(provider_id),
+                customer_id ? Number(customer_id) : null,
+                day_of_week,
+                start_time,
+                end_time,
+                recurrence_weeks ? Number(recurrence_weeks) : 1,
+                beginning || null,
+                is_active !== undefined ? (is_active ? 1 : 0) : 1,
+                note || null
+            ]
+        );
+        return res.status(201).json({ ok: true, id: result.insertId });
+    }),
+
+    reservedSlotsUpdate: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const id = Number(req.params.id);
+        if (!id) throw httpError(400, "id zorunlu");
+        const body = req.body || {};
+        const fields = [];
+        const params = [];
+        const allowed = ["provider_id", "customer_id", "day_of_week", "start_time",
+                         "end_time", "recurrence_weeks", "beginning", "is_active", "note"];
+        for (const f of allowed) {
+            if (body[f] !== undefined) {
+                fields.push(`${f} = ?`);
+                params.push(f === "provider_id" || f === "customer_id" || f === "recurrence_weeks"
+                    ? Number(body[f]) : body[f]);
+            }
+        }
+        if (fields.length === 0) throw httpError(400, "Güncellenecek alan yok");
+        fields.push("updated_at = NOW()");
+        params.push(id);
+        await pool.execute(
+            `UPDATE reserved_slots SET ${fields.join(", ")} WHERE id = ?`,
+            params
+        );
+        return res.json({ ok: true });
+    }),
+
+    reservedSlotsDelete: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const id = Number(req.params.id);
+        if (!id) throw httpError(400, "id zorunlu");
+        await pool.execute(`DELETE FROM reserved_slots WHERE id = ?`, [id]);
+        return res.json({ ok: true });
+    }),
+
+    reservedSlotsGetById: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const id = Number(req.params.id);
+        if (!id) throw httpError(400, "id zorunlu");
+        const [rows] = await pool.execute(
+            `SELECT rs.*, sp.name AS provider_name, c.display_name AS customer_name
+             FROM reserved_slots rs
+             LEFT JOIN service_providers sp ON sp.id = rs.provider_id
+             LEFT JOIN customers c ON c.id = rs.customer_id
+             WHERE rs.id = ? LIMIT 1`,
+            [id]
+        );
+        return res.json({ ok: true, item: rows[0] || null });
+    }),
+
+    /**
+     * POST /api/reserved-slots/check-conflicts
+     * Verilen parametrelere göre çakışan rezervasyonları döner.
+     * Kaydetmeden önce çakışma kontrolü yapar.
+     */
+    reservedSlotsCheckConflicts: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        await requireAdminUser(decoded);
+        const body = req.body || {};
+        const { provider_id, day_of_week, start_time, end_time, beginning, exclude_id } = body;
+        if (!provider_id) throw httpError(400, "provider_id zorunlu");
+        if (!day_of_week) throw httpError(400, "day_of_week zorunlu");
+        if (!start_time) throw httpError(400, "start_time zorunlu");
+        if (!end_time) throw httpError(400, "end_time zorunlu");
+
+        // Overlap check: NOT (end_a <= start_b OR start_a >= end_b)
+        const query = `
+            SELECT id, day_of_week, start_time, end_time, beginning, note, customer_id
+            FROM reserved_slots
+            WHERE provider_id = ?
+              AND is_active = 1
+              AND day_of_week = ?
+              AND end_time > ?
+              AND start_time < ?
+              AND (? IS NULL OR beginning IS NULL OR beginning <= CURDATE())
+              AND (? IS NULL OR id != ?)
+        `;
+        const [rows] = await pool.execute(query, [
+            Number(provider_id),
+            day_of_week,
+            start_time,
+            end_time,
+            beginning || null,
+            exclude_id || null,
+            exclude_id || null
+        ]);
+        return res.json({ ok: true, conflicts: rows });
+    }),
+
+    servicesGet: asyncWrap(async (req, res) => {
+        const { id } = req.params;
+        const businessId = getPersonalBusinessId();
+        const [rows] = await pool.execute(
+            `SELECT sv.*, ? AS business_id FROM services sv WHERE sv.id = ?`,
+            [businessId, id]
+        );
+        if (!rows.length) return res.status(404).json({ ok: false, message: "Service not found" });
+        return res.json({ ok: true, item: rows[0] });
+    }),
+
+    soundsList: asyncWrap(async (req, res) => {
+        const [rows] = await pool.execute(`SELECT * FROM sounds ORDER BY id DESC`);
+        return res.json({ ok: true, items: rows });
+    }),
+
+    soundsGet: asyncWrap(async (req, res) => {
+        const { id } = req.params;
+        const [rows] = await pool.execute(`SELECT * FROM sounds WHERE id = ? LIMIT 1`, [id]);
+        if (!rows.length) return res.status(404).json({ ok: false, message: "Sound not found" });
+        return res.json({ ok: true, item: rows[0] });
+    }),
+
+    // Desktop Events ACK — desktop uygulaması yazdırma sonucunu bildirir
+    desktopEventAck: asyncWrap(async (req, res) => {
+        const decoded = requireUser(req);
+        const { eventId, status, reason } = req.body || {};
+
+        if (!eventId) throw httpError(400, "eventId zorunlu");
+        if (!["success", "failed"].includes(status)) {
+            throw httpError(400, "status 'success' veya 'failed' olmalı");
+        }
+
+        // Şimdilik console log — ileride veritabanına kaydedilebilir
+        console.log(`[DesktopACK] event=${eventId} status=${status} reason=${reason || ""}`);
+
+        return res.json({ ok: true });
+    }),
+
+    // Desktop Appointments Today — yazıcı için günlük veri
+    desktopAppointmentsToday: asyncWrap(async (req, res) => {
+        // X-Desktop-Secret auth (fail closed)
+        const secret = process.env.DESKTOP_EVENTS_SECRET;
+        if (!secret || req.headers["x-desktop-secret"] !== secret) {
+            throw httpError(401, "Unauthorized");
+        }
+
+        const dateStr = req.query.date || todayYmd();
+        const nextDateStr = addDaysYmd(dateStr, 1);
+
+        // SQL: date 06:00 → next_date 03:00 (gece yarısı devam eden randevular için)
+        const startRange = `${dateStr} 06:00:00`;
+        const endRange = `${nextDateStr} 03:00:00`;
+
+        // Business/branch info (app_settings)
+        const settings = await getBusinessSettingsJson(getPersonalBusinessId());
+
+        // Günün randevuları
+        const [appts] = await pool.execute(
+            `SELECT
+                 a.id,
+                 a.start_at,
+                 a.end_at,
+                 a.status,
+                 a.service_name_snapshot,
+                 a.service_duration_minutes_snapshot,
+                 a.service_price_snapshot,
+                 a.provider_name_snapshot,
+                 a.provider_type_snapshot,
+                 a.customer_note,
+                 a.staff_note,
+                 c.id AS customer_id,
+                 c.display_name AS customer_name,
+                 c.nickname AS customer_nickname,
+                 c.phone AS customer_phone
+             FROM appointments a
+             LEFT JOIN customers c ON c.id = a.customer_id
+             WHERE a.start_at >= ? AND a.start_at < ?
+               AND a.status IN ('confirmed','completed','no_show')
+             ORDER BY a.start_at ASC`,
+            [startRange, endRange]
+        );
+
+        return res.json({
+            ok: true,
+            date: dateStr,
+            business: {
+                name: settings.business_name,
+                phone: settings.business_phone,
+                address: settings.business_address,
+                city: settings.business_city,
+                district: settings.business_district
+            },
+            branch: {
+                name: settings.branch_name,
+                phone: settings.branch_phone,
+                address: settings.branch_address
+            },
+            printer_settings: {
+                printer_enabled: !!settings.printer_enabled,
+                printer_auto_print_new: !!settings.printer_auto_print_new,
+                printer_daily_report: !!settings.printer_daily_report
+            },
+            appointments: appts.map(a => ({
+                id: a.id,
+                start_at: a.start_at,
+                end_at: a.end_at,
+                status: a.status,
+                service_name: a.service_name_snapshot,
+                service_duration: a.service_duration_minutes_snapshot,
+                service_price: a.service_price_snapshot,
+                provider_name: a.provider_name_snapshot,
+                provider_type: a.provider_type_snapshot,
+                customer_id: a.customer_id,
+                customer_name: a.customer_name,
+                customer_nickname: a.customer_nickname,
+                customer_phone: a.customer_phone,
+                customer_note: a.customer_note,
+                staff_note: a.staff_note
+            })),
+            count: appts.length
+        });
+    }),
+
+    // Desktop Appointment By ID — tek randevu detayı
+    desktopAppointmentById: asyncWrap(async (req, res) => {
+        // X-Desktop-Secret auth (fail closed)
+        const secret = process.env.DESKTOP_EVENTS_SECRET;
+        if (!secret || req.headers["x-desktop-secret"] !== secret) {
+            throw httpError(401, "Unauthorized");
+        }
+
+        const appointmentId = Number(req.params.id);
+        if (!appointmentId) throw httpError(400, "Geçersiz appointment ID");
+
+        // Business/branch info (app_settings)
+        const settings = await getBusinessSettingsJson(getPersonalBusinessId());
+
+        // Randevu detayı
+        const [appts] = await pool.execute(
+            `SELECT
+                 a.id,
+                 a.start_at,
+                 a.end_at,
+                 a.status,
+                 a.service_name_snapshot,
+                 a.service_duration_minutes_snapshot,
+                 a.service_price_snapshot,
+                 a.provider_name_snapshot,
+                 a.provider_type_snapshot,
+                 a.customer_note,
+                 a.staff_note,
+                 c.id AS customer_id,
+                 c.display_name AS customer_name,
+                 c.nickname AS customer_nickname,
+                 c.phone AS customer_phone
+             FROM appointments a
+             LEFT JOIN customers c ON c.id = a.customer_id
+             WHERE a.id = ?
+             LIMIT 1`,
+            [appointmentId]
+        );
+
+        if (!appts.length) {
+            throw httpError(404, "Randevu bulunamadı");
+        }
+
+        const a = appts[0];
+        return res.json({
+            ok: true,
+            appointment: {
+                id: a.id,
+                start_at: a.start_at,
+                end_at: a.end_at,
+                status: a.status,
+                service_name: a.service_name_snapshot,
+                service_duration: a.service_duration_minutes_snapshot,
+                service_price: a.service_price_snapshot,
+                provider_name: a.provider_name_snapshot,
+                provider_type: a.provider_type_snapshot,
+                customer_id: a.customer_id,
+                customer_name: a.customer_name,
+                customer_nickname: a.customer_nickname,
+                customer_phone: a.customer_phone,
+                customer_note: a.customer_note,
+                staff_note: a.staff_note
+            },
+            business: {
+                name: settings.business_name,
+                phone: settings.business_phone,
+                address: settings.business_address,
+                city: settings.business_city,
+                district: settings.business_district
+            },
+            branch: {
+                name: settings.branch_name,
+                phone: settings.branch_phone,
+                address: settings.branch_address
+            },
+            printer_settings: {
+                printer_enabled: !!settings.printer_enabled,
+                printer_auto_print_new: !!settings.printer_auto_print_new,
+                printer_daily_report: !!settings.printer_daily_report
+            }
+        });
+    }),
+
+    // Desktop Settings — app_settings tablosundan settings döndürür
+    desktopSettings: asyncWrap(async (req, res) => {
+        // X-Desktop-Secret auth (fail closed)
+        const secret = process.env.DESKTOP_EVENTS_SECRET;
+        if (!secret || req.headers["x-desktop-secret"] !== secret) {
+            throw httpError(401, "Unauthorized");
+        }
+
+        const { settingsJson, updated_at } = await getAppSettingsRow();
+        return res.json({ ok: true, settings: settingsJson, updated_at });
+    }),
+
+    // Desktop Print — randevuyu yazdır (desktop SSE'ye print komutu gönderir)
+    desktopPrint: asyncWrap(async (req, res) => {
+        // Auth OR: X-Desktop-Secret VEYA admin JWT (berber paneli admin kullanıcısı)
+        const secret = process.env.DESKTOP_EVENTS_SECRET;
+        const hasDesktopSecret = secret && req.headers["x-desktop-secret"] === secret;
+        let hasAdminJwt = false;
+        try {
+            const decoded = requireUser(req);
+            await requireAdminUser(decoded);
+            hasAdminJwt = true;
+        } catch (e) {
+            hasAdminJwt = false;
+        }
+
+        if (!hasDesktopSecret && !hasAdminJwt) {
+            throw httpError(401, "Unauthorized");
+        }
+
+        const appointmentId = Number(req.params.id);
+        if (!appointmentId) throw httpError(400, "Geçersiz appointment ID");
+
+        // Randevu var mı kontrol et
+        const [appts] = await pool.execute(
+            `SELECT start_at FROM appointments WHERE id = ? LIMIT 1`,
+            [appointmentId]
+        );
+        if (!appts.length) throw httpError(404, "Randevu bulunamadı");
+
+        // Desktop SSE'ye print komutu gönder
+        const event = emitDesktopEvent("command", "print.appointment", {
+            appointmentId,
+            date: appts[0].start_at
+        });
+
+        return res.json({ ok: true, eventId: event.id });
+    }),
+
+    // Desktop Event Action — calendar'dan gün başı/gün sonu komutu
+    desktopEventAction: asyncWrap(async (req, res) => {
+        // JWT auth — web/calendar tarafından kullanılır
+        requireUser(req);
+
+        const { action } = req.body || {};
+        if (action !== "day.start" && action !== "day.end") {
+            throw httpError(400, "Invalid action");
+        }
+
+        emitDesktopEvent("command", action, {
+            triggeredAt: new Date().toISOString(),
+            triggeredBy: "calendar"
+        });
+
+        res.json({ ok: true });
     }),
 };
 

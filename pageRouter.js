@@ -16,10 +16,12 @@ const routes = {
     "/login_barber": "login_barber.html",
     "/bPanel": "bPanel.html",
     "/bPanel/settings": "bPanel/settings.html",
+    "/randevular": "randevular.html",
     "/randevu": "randevu.html",
-    "/randevu/new": "randevu/new.html",
     "/aydinlatma": "aydinlatma.html",
     "/gizlilik": "gizlilik.html",
+    "/monitor": "monitor.html",
+    "/timeline": "timeline.html"
 };
 
 Object.entries(routes).forEach(([route, file]) => {

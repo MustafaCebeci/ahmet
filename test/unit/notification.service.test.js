@@ -10,12 +10,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../../config.js', () => ({
   env: vi.fn((key, fallback) => {
     const envMap = {
-      'SMS_USER': 'testuser',
-      'SMS_PASS': 'testpass',
-      'SMS_BASLIK': 'TEST',
-      'SMS_ENDPOINT': 'https://test.api.netgsm.com',
-      'SMS_VERIFY_SSL': 'false',
-      'SMS_PROVIDER': 'netgsm',
       'NETGSM_USER': 'testuser',
       'NETGSM_PASS': 'testpass',
       'NETGSM_HEADER': 'TEST',
@@ -31,7 +25,7 @@ vi.mock('../../config.js', () => ({
   }),
 }));
 
-// Mock sms.provider.js
+// Mock sms.provider
 vi.mock('../../sms.provider.js', () => ({
   createSmsProvider: vi.fn().mockImplementation(() => ({
     topluMesajGonder: vi.fn().mockResolvedValue({ status: true, msg_id: 'mock-123' }),
@@ -222,7 +216,7 @@ describe('sendSms()', () => {
     vi.clearAllMocks();
   });
 
-  it('sends SMS via NetGSMApi', async () => {
+  it('sends SMS via NetGSM', async () => {
     const result = await notificationService.sendSms({
       phone: '5467473915',
       message: 'Test message',

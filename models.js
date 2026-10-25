@@ -174,7 +174,7 @@ const Models = {
     services: createCrudModel({
         table: "services",
         pk: "id",
-        columns: ["id", "name", "duration_minutes", "price", "is_active", "created_at", "updated_at"],
+        columns: ["id", "name", "duration_minutes", "price", "sound_id", "is_active", "is_default", "created_at", "updated_at"],
     }),
 
     staff: createCrudModel({
@@ -340,6 +340,37 @@ const Models = {
         table: "provider_static_slots",
         pk: "id",
         columns: ["id", "provider_id", "start_time", "end_time", "is_active", "created_at", "updated_at"],
+    }),
+
+    reserved_slots: createCrudModel({
+        table: "reserved_slots",
+        pk: "id",
+        columns: [
+            "id", "provider_id", "customer_id", "day_of_week",
+            "start_time", "end_time", "recurrence_weeks",
+            "beginning", "is_active", "note", "created_at", "updated_at"
+        ],
+    }),
+
+    // WhatsApp Webhook Tables
+    incoming_whatsapp_messages: createCrudModel({
+        table: "incoming_whatsapp_messages",
+        pk: "id",
+        columns: [
+            "id", "message_id", "phone", "from_name", "app_id",
+            "payload", "processed", "processed_at", "created_at"
+        ],
+    }),
+
+    // WhatsApp Outbound Messages
+    whatsapp_messages: createCrudModel({
+        table: "whatsapp_messages",
+        pk: "id",
+        columns: [
+            "id", "appointment_id", "customer_id", "to_phone", "type", "source",
+            "body", "wa_message_id", "template_name", "status", "error_message",
+            "scheduled_at", "sent_at", "created_at", "updated_at"
+        ],
     }),
 };
 

@@ -10,7 +10,7 @@
 INSERT INTO app_settings (id, settings_json, updated_at)
 VALUES (
  1,
-    '{"end_hour": "20:30", "start_hour": "09:30", "closed_days": [0], "sms_reminder": true, "no_show_limit": 3, "reminder_hours": 6, "otp_ttl_seconds": 60, "sms_notification": true, "no_show_window_hours": 24, "cancel_deadline_hours": 2, "no_show_grace_minutes": 30, "booking_coming_day_range": 2, "multiple_appointment_count": 8, "scheduler_interval_minutes": 15}',
+    '{"end_hour": "20:30", "start_hour": "09:30", "closed_days": [0], "sms_reminder": true, "no_show_limit": 3, "reminder_hours": 6, "otp_ttl_seconds": 60, "sms_notification": true, "no_show_window_hours": 24, "cancel_deadline_hours": 2, "no_show_grace_minutes": 30, "booking_coming_day_range": 2, "multiple_appointment_count": 8, "scheduler_interval_minutes": 15, "booking_flow_mode": "detailed"}',
     NULL
 );
 
@@ -23,12 +23,12 @@ VALUES (1, 'Mustafa Admin', '5467473915', NULL, 1, NULL, NULL);
 -- ----------------------------------------------------------
 -- 3. SERVICES
 -- ----------------------------------------------------------
-INSERT INTO services (id, name, duration_minutes, price, is_active, created_at, updated_at)
+INSERT INTO services (id, name, duration_minutes, price, is_active, is_default, created_at, updated_at)
 VALUES
-    (1, 'Saç Kesimi', 30, 150, 1, NULL, NULL),
-    (2, 'Saç & Sakal', 45, 200, 1, NULL, NULL),
-    (3, 'Sakal Kesimi', 20, 100, 1, NULL, NULL),
-    (4, 'Cilt Bakımı', 60, 250, 1, NULL, NULL);
+    (1, 'Saç Kesimi', 30, 150, 1, 1, NULL, NULL),
+    (2, 'Saç & Sakal', 45, 200, 1, 0, NULL, NULL),
+    (3, 'Sakal Kesimi', 20, 100, 1, 0, NULL, NULL),
+    (4, 'Cilt Bakımı', 60, 250, 1, 0, NULL, NULL);
 
 -- ----------------------------------------------------------
 -- 4. SERVICE_PROVIDERS

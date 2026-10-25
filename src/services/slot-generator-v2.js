@@ -67,6 +67,7 @@ function generateSlotsV2Engine(input) {
         closures = [],
         breakRules = [],
         staticSlots = [],
+        reservedSlots = [],
         isToday = false,
         currentMinute = null,
         settings = {},
@@ -94,8 +95,26 @@ function generateSlotsV2Engine(input) {
 
     // Add closures
     for (const closure of closures) {
-        const startMin = parseHHMM(closure.start);
-        const endMin = parseHHMM(closure.end);
+        let startMin, endMin;
+
+        if (closure.is_all_day == 1) {
+            // closure.start = "2026-08-17T00:00", closure.end = "2026-08-24T23:59"
+            const closureStartDate = String(closure.start).split('T')[0];
+            const closureEndDate = String(closure.end).split('T')[0];
+
+            // Skip if targetDate is not in range
+            if (date < closureStartDate || date > closureEndDate) {
+                continue;
+            }
+
+            // targetDate is in range → full day closure → use workingHours
+            startMin = parseHHMM(startHour);
+            endMin = parseHHMM(endHour);
+        } else {
+            startMin = parseHHMM(closure.start);
+            endMin = parseHHMM(closure.end);
+        }
+
         if (endMin > startMin) {
             busyIntervals.push({
                 start: startMin,
@@ -118,6 +137,19 @@ function generateSlotsV2Engine(input) {
         }
     }
 
+    // Add reserved slots
+    for (const rs of reservedSlots) {
+        const startMin = parseHHMM(rs.start);
+        const endMin = parseHHMM(rs.end);
+        if (endMin > startMin) {
+            busyIntervals.push({
+                start: startMin,
+                end: endMin,
+                type: 'reserved'
+            });
+        }
+    }
+
     // ====== STEP 2: Merge Overlapping Intervals ======
     // Sort by start time
     const sorted = [...busyIntervals].sort((a, b) => a.start - b.start);
@@ -130,8 +162,8 @@ function generateSlotsV2Engine(input) {
         } else {
             // Overlapping - extend the previous interval
             merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, iv.end);
-            // Keep the more restrictive type (closure > break > appointment)
-            const typePriority = { closure: 3, break: 2, appointment: 1 };
+            // Keep the more restrictive type (closure > reserved > break > appointment)
+            const typePriority = { closure: 4, reserved: 3, break: 2, appointment: 1 };
             if ((typePriority[iv.type] || 0) > (typePriority[merged[merged.length - 1].type] || 0)) {
                 merged[merged.length - 1].type = iv.type;
             }
@@ -209,7 +241,7 @@ function generateSlotsV2Engine(input) {
             }
         } else if (segmentType === 'appointment') {
             status = 'busy';
-        } else if (segmentType === 'closure' || segmentType === 'break') {
+        } else if (segmentType === 'closure' || segmentType === 'reserved' || segmentType === 'break') {
             status = 'closed';
         } else {
             // Empty segment - check if service fits
@@ -242,18 +274,74 @@ function generateSlotsV2Engine(input) {
         });
     }
 
-    // ====== STEP 7: Filter Past Times for Today ======
+    // ====== STEP 7: Filter Past Times for Today (REWRITTEN) ======
+    // Three-way filter: drop fully-past, mark currently-running as 'inProgress', keep future as-is.
+    // Day-end / full-day-closure fallbacks rewrite only when semantically correct.
     let filteredSlots = slots;
+    let dayAlreadyOver = false;
+    let dayFullyClosed = false;
+
     if (isToday && currentMinute !== null) {
-        filteredSlots = slots.filter(slot => {
-            const slotStartMin = parseHHMM(slot.start);
-            return slotStartMin >= currentMinute;
-        });
+        const closeMin = parseHHMM(endHour);
+
+        // Durum A: Gün bitti (currentMinute >= closeMin)
+        if (currentMinute >= closeMin) {
+            dayAlreadyOver = true;
+            filteredSlots = [];
+        } else {
+            // Üç-durumlu filtreleme
+            filteredSlots = slots.flatMap(slot => {
+                const slotStartMin = parseHHMM(slot.start);
+                const slotEndMin   = parseHHMM(slot.end);
+
+                // Tamamen geçmiş — at
+                if (slotEndMin <= currentMinute) return [];
+
+                // Şu anda devam ediyor — inProgress status'ü ile işaretle
+                // (currentMinute slot.start'a eşitse henüz başlamamış sayılır)
+                if (slotStartMin < currentMinute && slotEndMin > currentMinute) {
+                    if (slot.status === 'available') {
+                        return [{ ...slot, status: 'inProgress' }];
+                    }
+                    return [slot]; // busy/closed/notAvailable — koru
+                }
+
+                // Gelecek — olduğu gibi koru
+                return [slot];
+            });
+
+            // Full-day closure sinyali: flatMap sonrası tüm slotlar non-available ise
+            // (örn. tüm gün closure + isToday=true)
+            if (filteredSlots.length > 0 && filteredSlots.every(s => s.status !== 'available')) {
+                const allClosed = filteredSlots.every(s => s.status === 'closed');
+                if (allClosed) {
+                    dayFullyClosed = true;
+                }
+            }
+
+            // Fallback (yeniden yazıldı): sadece gerçek full-day closure durumunda tüm günü closed yap
+            if (filteredSlots.length === 0 && slots.length > 0) {
+                const hasAnyNonAvailable = slots.some(s =>
+                    s.status === 'busy' || s.status === 'closed' || s.status === 'notAvailable'
+                );
+                if (hasAnyNonAvailable) {
+                    // Gerçek closure var — orijinal status'ları koru
+                    filteredSlots = slots;
+                    dayFullyClosed = true;
+                } else {
+                    // Hepsi available'dı ama hepsi geçmiş — gün bitti
+                    filteredSlots = [];
+                    dayAlreadyOver = true;
+                }
+            }
+        }
     }
 
     // ====== STEP 8: Build Response ======
     return {
         slots: filteredSlots,
+        dayAlreadyOver,
+        dayFullyClosed,
         settings: {
             open_time: startHour,
             close_time: endHour,
